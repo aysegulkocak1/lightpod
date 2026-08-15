@@ -30,3 +30,12 @@ go.work.sum
 # Editor/IDE
 .idea/
 .vscode/
+
+# Built binaries
+/lightpod
+/lightpod-*
+/rootfs/
+/bundle/
+
+# Local design notes, not published
+/docs/
