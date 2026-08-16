@@ -112,6 +112,48 @@ func TestDefaultProfileDeniesEscapeSyscalls(t *testing.T) {
 	}
 }
 
+func TestDefaultProfileAllowsRealTimeScheduling(t *testing.T) {
+	// Robotics control loops need SCHED_FIFO/SCHED_RR. Blocking these bought
+	// nothing anyway — sched_setattr does the same job and was always allowed —
+	// while breaking every RT workload. The real gate is CAP_SYS_NICE.
+	required := []string{
+		"sched_setscheduler", "sched_setparam", "sched_setattr",
+		"sched_rr_get_interval", "mlockall", "setpriority",
+	}
+
+	allowed := allowedSyscalls()
+	for _, name := range required {
+		if !allowed[name] {
+			t.Errorf("%s is not allowed; real-time workloads will fail at startup", name)
+		}
+	}
+}
+
+func TestRealTimeStaysGatedByCapabilities(t *testing.T) {
+	// Allowing the syscall is only safe because the capability is not granted.
+	// If CAP_SYS_NICE ever lands in the defaults, every container gains the
+	// ability to starve the host CPU.
+	for _, name := range oci.DefaultCapabilities {
+		if name == "CAP_SYS_NICE" {
+			t.Fatal("CAP_SYS_NICE is in the default capability set: containers can now " +
+				"raise real-time priority and starve the host")
+		}
+	}
+}
+
+func allowedSyscalls() map[string]bool {
+	allowed := map[string]bool{}
+	for _, rule := range oci.DefaultSeccompProfile().Syscalls {
+		if rule.Action != oci.ActAllow {
+			continue
+		}
+		for _, name := range rule.Names {
+			allowed[name] = true
+		}
+	}
+	return allowed
+}
+
 func TestDefaultProfileAllowsOrdinaryWork(t *testing.T) {
 	// The opposite failure: a profile so tight nothing runs. These are the
 	// syscalls any process makes before it does anything interesting.

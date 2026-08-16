@@ -93,8 +93,7 @@ func CompileSeccomp(profile *oci.LinuxSeccomp) ([]sockFilter, error) {
 	// straight past the allowlist.
 	//
 	// The kill sits right after the comparison to keep every jump offset at 0
-	// or 1 — they're 8-bit, and targets at the end of the program would
-	// overflow once the profile grows past 255 instructions.
+	// or 1
 	filter = append(filter,
 		sockFilter{code: opLoadAbsWord, k: offsetArch},
 		sockFilter{code: opJumpEqual, jt: 1, jf: 0, k: auditArch},

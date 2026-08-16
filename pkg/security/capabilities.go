@@ -123,17 +123,15 @@ func parseCapabilities(names []string) (capSet, error) {
 	return set, nil
 }
 
-// ApplyCapabilities reduces the process to exactly what the spec asks for,
-// across all five sets.
+// ApplyCapabilities reduces the process to exactly what the spec asks for.
 //
 // Order matters:
-//  1. Bounding first, while we still hold CAP_SETPCAP — dropping needs it.
-//  2. Clear ambient, so nothing survives the coming execve by accident.
-//  3. capset for effective/permitted/inheritable. This is the step that
-//     actually removes live privileges; bounding alone caps only what could be
-//     regained later.
-//  4. Ambient raises last — a cap can only go ambient once it's in permitted
-//     and inheritable.
+//  1. Bounding first, while we still hold CAP_SETPCAP.
+//  2. Clear ambient, so nothing survives execve by accident.
+//  3. capset — the step that actually removes live privileges. Bounding alone
+//     only caps what could be regained later.
+//  4. Ambient raises last; a cap can only go ambient once it's permitted and
+//     inheritable.
 func ApplyCapabilities(caps *oci.LinuxCapabilities) error {
 	if caps == nil {
 		return nil

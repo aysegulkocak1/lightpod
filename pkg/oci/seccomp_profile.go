@@ -2,15 +2,13 @@ package oci
 
 // DefaultSeccompProfile is the built-in policy.
 //
-// Allowlist, not blocklist. A blocklist needs updating every time the kernel
-// gains a syscall, and the gap between "kernel ships io_uring" and "runtime
-// blocks it" is where escapes live.
+// Allowlist, not blocklist — a blocklist needs updating every time the kernel
+// gains a syscall, and that gap is where escapes live. Default action is EPERM
+// rather than KILL because robotics and ML stacks probe for optional syscalls
+// at startup and should degrade, not die.
 //
-// Default action is EPERM rather than KILL: robotics and ML stacks probe for
-// optional syscalls at startup and should degrade, not die.
-//
-// Expressed as an OCI type so it lands in the generated config.json and can be
-// read with `lightpod spec` instead of dug out of Go source.
+// Expressed as an OCI type so it lands in config.json and is readable with
+// `lightpod spec` instead of buried in Go source.
 func DefaultSeccompProfile() *LinuxSeccomp {
 	eperm := uint(1) // EPERM
 	return &LinuxSeccomp{
@@ -38,12 +36,11 @@ var defaultSeccompArchitectures = []string{
 //
 // Left out on purpose — mount/umount2/pivot_root/chroot, the module and kexec
 // calls, ptrace and process_vm_*, bpf, perf_event_open, setns, unshare, the
-// keyring calls, userfaultfd, io_uring, swapon/quotactl/acct. Each is either an
-// escape primitive or a way to tamper with the host.
+// keyring calls, userfaultfd, io_uring, swapon/quotactl/acct.
 //
-// clone and clone3 are allowed — a container that can't fork is useless. Their
-// namespace flags are handled by a different layer: without CAP_SYS_ADMIN the
-// kernel refuses them anyway.
+// clone and clone3 are allowed; a container that can't fork is useless. Their
+// namespace flags are gated elsewhere — without CAP_SYS_ADMIN the kernel
+// refuses them anyway.
 var defaultAllowedSyscalls = []string{
 	// process lifecycle
 	"execve", "execveat", "exit", "exit_group", "clone", "clone3", "fork", "vfork",
@@ -51,8 +48,14 @@ var defaultAllowedSyscalls = []string{
 	"set_tid_address", "rt_sigreturn", "sigreturn",
 
 	// scheduling and identity
+	//
+	// The RT calls are allowed on purpose: robotics control loops need
+	// SCHED_FIFO, and blocking them bought nothing since sched_setattr does the
+	// same job and was always allowed. CAP_SYS_NICE is the real gate, and it is
+	// not in the default set.
 	"sched_yield", "sched_getaffinity", "sched_setaffinity", "sched_getparam",
-	"sched_getscheduler", "sched_get_priority_max", "sched_get_priority_min",
+	"sched_setparam", "sched_getscheduler", "sched_setscheduler",
+	"sched_get_priority_max", "sched_get_priority_min", "sched_rr_get_interval",
 	"getuid", "geteuid", "getgid", "getegid", "getgroups", "setgroups",
 	"setuid", "setgid", "setresuid", "setresgid", "getresuid", "getresgid",
 	"setpgid", "getpgid", "getpgrp", "setsid", "getsid", "capget", "capset",
@@ -64,6 +67,7 @@ var defaultAllowedSyscalls = []string{
 	"creat", "lseek", "dup", "dup2", "dup3", "pipe", "pipe2", "fcntl", "flock",
 	"fsync", "fdatasync", "sync", "syncfs", "truncate", "ftruncate", "fallocate",
 	"sendfile", "copy_file_range", "splice", "tee", "vmsplice", "readahead",
+	"fadvise64", "sync_file_range",
 
 	// filesystem metadata
 	"stat", "fstat", "lstat", "newfstatat", "statx", "statfs", "fstatfs",
@@ -111,8 +115,12 @@ var defaultAllowedSyscalls = []string{
 	"getsockname", "getpeername", "sendto", "recvfrom", "sendmsg", "recvmsg",
 	"sendmmsg", "recvmmsg", "shutdown", "getsockopt", "setsockopt",
 
+	// process handles — modern supervisors and language runtimes use these
+	// instead of raw pids, which race with pid reuse
+	"pidfd_open", "pidfd_send_signal", "pidfd_getfd",
+
 	// terminal and misc
 	"ioctl", "uname", "sysinfo", "getrandom", "arch_prctl", "prctl",
-	"personality", "gettid", "sched_getattr", "sched_setattr",
-	"rseq", "set_thread_area", "get_thread_area", "ugetrlimit",
+	"personality", "gettid", "sched_getattr", "sched_setattr", "getcpu",
+	"clock_adjtime", "rseq", "set_thread_area", "get_thread_area", "ugetrlimit",
 }
