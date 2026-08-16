@@ -13,16 +13,15 @@ import (
 	"github.com/aysegulkocak1/lightpod/pkg/security"
 )
 
-// InitStage1 gets the container an identity, then replaces itself.
+// InitStage1 gets the container an identity, then re-execs itself.
 //
-// Two stages because execve from an unmapped uid wipes the permitted capability
-// set, and the clone lands us there before uid_map is written. Caps are only
-// recomputed on exec, so we exec once more after the mapping exists — by then
-// we're uid 0 in the namespace and get the full set. Symptom without this was a
-// PID 1 that couldn't make its own mount namespace private.
+// execve from an unmapped uid wipes the permitted capability set, and the clone
+// lands us there before uid_map is written. Capabilities are only recomputed on
+// exec, so we exec once more once the mapping exists and we are uid 0 in the
+// namespace.
 //
 // Handshaking here also lets the parent use newuidmap, which is how rootless
-// maps a whole /etc/subuid range instead of one id.
+// maps a whole /etc/subuid range instead of a single id.
 func InitStage1() error {
 	// Config stays unread in the pipe — stage 2 wants it and we're about to be
 	// replaced.
@@ -120,8 +119,8 @@ func initSetup(cfg *initConfig, sync *syncPipe) error {
 		return err
 	}
 
-	// Report ready before seccomp: a useful profile would otherwise have to
-	// allow the very syscalls used to report success.
+	// Before seccomp: a useful profile would have to allow the syscalls this
+	// message needs.
 	//
 	// Also before touching the FIFO. Opening it for writing blocks until a
 	// reader shows up, and that reader is `lightpod start`, which only runs

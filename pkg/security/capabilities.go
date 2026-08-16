@@ -206,8 +206,7 @@ func ApplyCapabilities(caps *oci.LinuxCapabilities) error {
 	return nil
 }
 
-// CurrentBounding reports what's left in the bounding set. For checking a
-// container really was reduced, rather than trusting ApplyCapabilities' nil.
+// CurrentBounding reports what's left in the bounding set.
 func CurrentBounding() (capSet, error) {
 	var set capSet
 	for bit := 0; bit <= lastCapability(); bit++ {

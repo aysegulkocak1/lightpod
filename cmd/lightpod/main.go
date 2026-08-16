@@ -1,3 +1,7 @@
+// Command lightpod is a daemonless container engine for edge, IoT and robotics.
+//
+// Meant to be used on its own — no daemon, no higher-level tool. It also
+// implements the OCI runtime verbs, so other tools can drive it.
 package main
 
 import (
@@ -11,7 +15,6 @@ import (
 )
 
 // globalOptions are the flags before the subcommand.
-
 type globalOptions struct {
 	root         string
 	logFile      string
@@ -39,8 +42,8 @@ func run(args []string) error {
 	fs.BoolVar(&opts.systemdGroup, "systemd-cgroup", false, "accepted for runc compatibility")
 	fs.BoolVar(&opts.debug, "debug", false, "verbose logging")
 	showVersion := fs.Bool("version", false, "print build information")
-	// runc flags we take and ignore; rejecting one would fail the container when
-	// podman or nvidia-container-runtime passes it.
+	// Taken and ignored; rejecting one would fail the container when another
+	// tool passes it.
 	fs.String("criu", "", "accepted for runc compatibility")
 	fs.Bool("rootless-compat", false, "accepted for runc compatibility")
 
@@ -120,7 +123,7 @@ func openStore(opts *globalOptions) (*state.Store, runtime.PrivilegeMode, error)
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `lightpod — a minimal, security-first OCI container runtime
+	fmt.Fprint(os.Stderr, `lightpod — a minimal, security-first container engine
 
 Usage:
   lightpod [global flags] <command> [arguments]
@@ -156,6 +159,8 @@ Flags for run and create:
   --cpus <n>          CPU limit, as a fraction of one core
   --pids <n>          maximum number of processes
   --hostname <name>   container hostname
+  --device <path>     host device, e.g. /dev/video0 (repeatable)
+  --gpu <spec>        NVIDIA GPUs: all, or indices like 0 or 0,1
   --cgroup none       run without cgroup limits (explicitly unlimited)
   --seccomp unconfined
                       run without a seccomp filter (explicitly unsandboxed)
@@ -169,7 +174,15 @@ Note on create:
 
 Examples:
   lightpod run --rootfs ./busybox demo /bin/sh
-  lightpod create --bundle ./mybundle web && lightpod start web
-  podman --runtime=$(command -v lightpod) run alpine echo hi
+  lightpod run --rootfs ./app -v /srv/models:/models:ro --device /dev/video0 cam /app
+  lightpod run --rootfs ./cuda-app --gpu all gpu /app
+  lightpod create --rootfs ./app web && lightpod start web && lightpod ps
+
+OCI runtime compatibility:
+  lightpod also implements the OCI runtime verbs, so tools that drive a runtime
+  can drive it. Not the primary way to use it, and not yet usable end to end:
+  networking and image pull are still missing.
+
+    podman --runtime=$(command -v lightpod) run alpine echo hi
 `)
 }

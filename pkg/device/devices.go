@@ -36,13 +36,6 @@ func Minor(dev uint64) int64 {
 	return int64(dev&0xff | uint64(uint32(dev>>12)&^0xff))
 }
 
-// IsCDIName reports whether a --device value is a CDI qualified name rather
-// than a host path. CDI names look like "nvidia.com/gpu=0"; paths start with a
-// slash. Anything else is rejected rather than guessed at.
-func IsCDIName(value string) bool {
-	return !strings.HasPrefix(value, "/") && strings.Contains(value, "=")
-}
-
 // ParseRawDevice turns a --device value into a spec device entry.
 //
 //	/dev/video0                 same path inside, rwm

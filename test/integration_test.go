@@ -57,8 +57,7 @@ func TestContainerSecurityPosture(t *testing.T) {
 		t.Error("/proc/sysrq-trigger is writable — the container can panic or reboot the host")
 	}
 
-	// Catches the capability policy silently no-opping, which is exactly what an
-	// earlier version of this runtime did.
+	// Catches the capability policy silently no-opping.
 	if report.CapEff == "0000003fffffffff" || report.CapEff == "000001ffffffffff" {
 		t.Errorf("CapEff = %s — the container holds a full capability set", report.CapEff)
 	}
@@ -308,8 +307,8 @@ func TestRealTimeSyscallReachesTheCapabilityGate(t *testing.T) {
 	env := setup(t)
 	report := env.runCheck(t, "rt")
 
-	// SCHED_OTHER needs no capability, so a failure here means the seccomp
-	// filter blocked the syscall — the bug this test exists to catch.
+	// SCHED_OTHER needs no capability, so a failure here means seccomp blocked
+	// the syscall.
 	if !report.RTSyscallOK {
 		t.Error("sched_setscheduler is blocked by seccomp; real-time workloads cannot start")
 	}

@@ -28,6 +28,7 @@ type runFlags struct {
 	ipc      string
 	workdir  string
 	user     string
+	gpu      string
 	volumes  repeatedFlag
 	devices  repeatedFlag
 	env      repeatedFlag
@@ -51,7 +52,8 @@ func registerRunFlags(fs *flag.FlagSet, rf *runFlags) {
 	fs.StringVar(&rf.rootfs, "rootfs", "", "root filesystem directory (generates a bundle with secure defaults)")
 	fs.Var(&rf.volumes, "v", "bind mount, host:container[:ro] (repeatable)")
 	fs.Var(&rf.volumes, "volume", "bind mount, host:container[:ro] (repeatable)")
-	fs.Var(&rf.devices, "device", "device to expose: /dev/video0[:rw] or nvidia.com/gpu=0 (repeatable)")
+	fs.Var(&rf.devices, "device", "host device to expose, e.g. /dev/video0[:rw] (repeatable)")
+	fs.StringVar(&rf.gpu, "gpu", "", "NVIDIA GPUs to expose: all, or indices like 0 or 0,1")
 	fs.Var(&rf.env, "env", "environment variable, KEY=VALUE (repeatable)")
 	fs.Var(&rf.env, "e", "environment variable, KEY=VALUE (repeatable)")
 	fs.Var(&rf.addCaps, "cap-add", "capability to grant, e.g. CAP_SYS_NICE (repeatable)")
@@ -94,6 +96,10 @@ func cmdRun(opts *globalOptions, args []string) error {
 	}
 
 	bundle, spec, err := resolveBundle(&rf, command, mode, store.Dir(id))
+	if err != nil {
+		return err
+	}
+	spec, err = applyGPU(bundle, id, spec, rf.gpu)
 	if err != nil {
 		return err
 	}
@@ -189,9 +195,6 @@ func applyRunFlags(spec *oci.Spec, rf *runFlags) error {
 		spec.Root.Readonly = true
 	}
 	if rf.tty {
-		// Setting spec.Process.Terminal would be a lie: nothing allocates a pty
-		// yet, so the flag would appear to work and change nothing. Refuse
-		// instead — a flag that silently does nothing is worse than a missing one.
 		return fmt.Errorf("--tty is not implemented yet: lightpod does not allocate a pty. " +
 			"Run without it, or use `lightpod exec` once that lands")
 	}
@@ -226,9 +229,6 @@ func applyRunFlags(spec *oci.Spec, rf *runFlags) error {
 	}
 
 	if rf.seccomp == "unconfined" {
-		// Loud on purpose. You asked for it, but a container running with no
-		// syscall filter shouldn't ever be a silent condition — least of all on
-		// a device in the field.
 		fmt.Fprintln(os.Stderr, "lightpod: WARNING: seccomp is disabled; the container can issue any syscall")
 		spec.Linux.Seccomp = nil
 	}

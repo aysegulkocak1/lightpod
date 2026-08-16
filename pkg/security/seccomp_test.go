@@ -9,7 +9,6 @@ import (
 // The compiler is unit tested because a mis-compiled filter fails silently: the
 // container starts, the workload runs, and the sandbox simply is not there. A
 // runtime error would at least be noticed.
-
 func TestCompileSeccompStructure(t *testing.T) {
 	profile := &oci.LinuxSeccomp{
 		DefaultAction: oci.ActErrno,
@@ -113,9 +112,7 @@ func TestDefaultProfileDeniesEscapeSyscalls(t *testing.T) {
 }
 
 func TestDefaultProfileAllowsRealTimeScheduling(t *testing.T) {
-	// Robotics control loops need SCHED_FIFO/SCHED_RR. Blocking these bought
-	// nothing anyway — sched_setattr does the same job and was always allowed —
-	// while breaking every RT workload. The real gate is CAP_SYS_NICE.
+	// Robotics control loops need SCHED_FIFO. The real gate is CAP_SYS_NICE.
 	required := []string{
 		"sched_setscheduler", "sched_setparam", "sched_setattr",
 		"sched_rr_get_interval", "mlockall", "setpriority",

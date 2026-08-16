@@ -111,8 +111,7 @@ func CompileSeccomp(profile *oci.LinuxSeccomp) ([]sockFilter, error) {
 
 	for i, rule := range profile.Syscalls {
 		if len(rule.Args) > 0 {
-			// Ignoring the condition would widen a narrow rule, i.e. a weaker
-			// sandbox than was written. Refuse instead.
+			// Ignoring the condition would widen a narrow rule.
 			return nil, fmt.Errorf("syscalls[%d]: argument-conditional rules are not supported yet", i)
 		}
 		action, err := actionValue(rule.Action, rule.ErrnoRet)

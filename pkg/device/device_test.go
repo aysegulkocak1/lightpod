@@ -2,7 +2,6 @@ package device
 
 import (
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -28,21 +27,6 @@ func TestMkdevRoundTrip(t *testing.T) {
 		}
 		if got := Minor(dev); got != c.minor {
 			t.Errorf("Minor(Mkdev(%d,%d)) = %d", c.major, c.minor, got)
-		}
-	}
-}
-
-func TestIsCDIName(t *testing.T) {
-	cases := map[string]bool{
-		"nvidia.com/gpu=0":   true,
-		"nvidia.com/gpu=all": true,
-		"/dev/video0":        false,
-		"/dev/video0:rw":     false,
-		"nvidia.com/gpu":     false, // no device part, not a usable CDI name
-	}
-	for input, want := range cases {
-		if got := IsCDIName(input); got != want {
-			t.Errorf("IsCDIName(%q) = %v, want %v", input, got, want)
 		}
 	}
 }
@@ -83,132 +67,68 @@ func TestParseRawDeviceRejects(t *testing.T) {
 	}
 }
 
-// cdiFixture is the shape nvidia-ctk emits, trimmed to what we read.
-const cdiFixture = `{
-  "cdiVersion": "0.6.0",
-  "kind": "nvidia.com/gpu",
-  "containerEdits": {
-    "env": ["NVIDIA_VISIBLE_DEVICES=void"],
-    "mounts": [
-      {"hostPath": "/usr/lib/libnvidia-ml.so.1",
-       "containerPath": "/usr/lib/libnvidia-ml.so.1",
-       "options": ["ro", "nosuid", "nodev", "bind"]}
-    ],
-    "hooks": [
-      {"hookName": "createContainer",
-       "path": "/usr/bin/nvidia-cdi-hook",
-       "args": ["nvidia-cdi-hook", "update-ldcache"]}
-    ]
-  },
-  "devices": [
-    {
-      "name": "0",
-      "containerEdits": {
-        "env": ["NVIDIA_VISIBLE_DEVICES=0"],
-        "deviceNodes": [
-          {"path": "/dev/null", "hostPath": "/dev/null", "type": "c", "major": 1, "minor": 3}
-        ]
-      }
-    }
-  ]
-}`
-
-func loadFixture(t *testing.T, files map[string]string) *Registry {
-	t.Helper()
-	dir := t.TempDir()
-	for name, content := range files {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	reg, err := LoadRegistry([]string{dir})
-	if err != nil {
-		t.Fatalf("LoadRegistry: %v", err)
-	}
-	return reg
-}
-
 func newSpec() *oci.Spec {
 	return &oci.Spec{
 		Version: "1.2.0",
-		Process: &oci.Process{Args: []string{"/bin/true"}},
+		Process: &oci.Process{Args: []string{"/bin/true"}, Env: []string{"PATH=/bin"}},
 		Linux:   &oci.Linux{},
 	}
 }
 
-func TestCDIInject(t *testing.T) {
-	reg := loadFixture(t, map[string]string{"nvidia.json": cdiFixture})
+func TestSetNVIDIAEnv(t *testing.T) {
 	spec := newSpec()
-
-	if err := reg.Inject(spec, "nvidia.com/gpu=0"); err != nil {
-		t.Fatalf("Inject: %v", err)
+	if err := SetNVIDIAEnv(spec, "0,1"); err != nil {
+		t.Fatalf("SetNVIDIAEnv: %v", err)
 	}
-
-	// Kind-wide edits and the device's own must both land.
-	if len(spec.Mounts) != 1 || spec.Mounts[0].Source != "/usr/lib/libnvidia-ml.so.1" {
-		t.Errorf("driver library mount missing: %+v", spec.Mounts)
+	env := strings.Join(spec.Process.Env, " ")
+	if !strings.Contains(env, "NVIDIA_VISIBLE_DEVICES=0,1") {
+		t.Errorf("NVIDIA_VISIBLE_DEVICES not set: %v", spec.Process.Env)
 	}
-	if len(spec.Linux.Devices) != 1 || spec.Linux.Devices[0].Path != "/dev/null" {
-		t.Errorf("device node missing: %+v", spec.Linux.Devices)
-	}
-	if len(spec.Process.Env) != 2 {
-		t.Errorf("expected both env entries, got %v", spec.Process.Env)
-	}
-	// createContainer, not createRuntime: it has to run inside the container's
-	// namespaces or the ldcache update lands on the host.
-	if spec.Hooks == nil || len(spec.Hooks.CreateContainer) != 1 {
-		t.Fatalf("createContainer hook missing: %+v", spec.Hooks)
-	}
-	if len(spec.Hooks.CreateRuntime) != 0 {
-		t.Errorf("hook went to the wrong lifecycle list")
+	if !strings.Contains(env, "NVIDIA_DRIVER_CAPABILITIES=all") {
+		t.Errorf("NVIDIA_DRIVER_CAPABILITIES not defaulted: %v", spec.Process.Env)
 	}
 }
 
-func TestCDIUnknownDevice(t *testing.T) {
-	reg := loadFixture(t, map[string]string{"nvidia.json": cdiFixture})
-	err := reg.Inject(newSpec(), "nvidia.com/gpu=7")
-	if err == nil {
-		t.Fatal("expected an error for an unknown device")
-	}
-	if !strings.Contains(err.Error(), "available") {
-		t.Errorf("error should list the available devices, got: %v", err)
-	}
-}
-
-func TestCDIYAMLOnlyExplainsItself(t *testing.T) {
-	// The common real-world case: the toolkit wrote YAML by default. The error
-	// has to name the fix, or the user is left with "device not found".
-	reg := loadFixture(t, map[string]string{"nvidia.yaml": "kind: nvidia.com/gpu\n"})
-	err := reg.Inject(newSpec(), "nvidia.com/gpu=0")
-	if err == nil {
-		t.Fatal("expected an error when only YAML is present")
-	}
-	if !strings.Contains(err.Error(), "--format=json") {
-		t.Errorf("error should give the regeneration command, got: %v", err)
-	}
-}
-
-func TestCDIRejectsUnknownMajorVersion(t *testing.T) {
-	_, err := LoadRegistry([]string{t.TempDir()})
-	if err != nil {
-		t.Fatalf("empty dir should be fine: %v", err)
-	}
-
-	dir := t.TempDir()
-	spec := strings.Replace(cdiFixture, `"cdiVersion": "0.6.0"`, `"cdiVersion": "1.0.0"`, 1)
-	if err := os.WriteFile(filepath.Join(dir, "future.json"), []byte(spec), 0o644); err != nil {
+func TestSetNVIDIAEnvKeepsAnExplicitCapabilityList(t *testing.T) {
+	spec := newSpec()
+	spec.Process.Env = append(spec.Process.Env, "NVIDIA_DRIVER_CAPABILITIES=compute")
+	if err := SetNVIDIAEnv(spec, "all"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadRegistry([]string{dir}); err == nil {
-		t.Fatal("expected an error for an unknown CDI major version")
+	for _, kv := range spec.Process.Env {
+		if kv == "NVIDIA_DRIVER_CAPABILITIES=all" {
+			t.Error("overrode an explicitly set NVIDIA_DRIVER_CAPABILITIES")
+		}
 	}
 }
 
-func TestCDIRejectsUnknownHookName(t *testing.T) {
-	// A hook we drop means the device is injected but not finished setting up.
-	bad := strings.Replace(cdiFixture, `"hookName": "createContainer"`, `"hookName": "whenever"`, 1)
-	reg := loadFixture(t, map[string]string{"nvidia.json": bad})
-	if err := reg.Inject(newSpec(), "nvidia.com/gpu=0"); err == nil {
-		t.Fatal("expected an error for an unknown hook lifecycle name")
+func TestInjectNVIDIAHook(t *testing.T) {
+	// Stand in for the toolkit's hook so this runs without it installed.
+	fake := t.TempDir() + "/nvidia-container-runtime-hook"
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LIGHTPOD_NVIDIA_HOOK", fake)
+
+	spec := newSpec()
+	if err := InjectNVIDIAHook(spec); err != nil {
+		t.Fatalf("InjectNVIDIAHook: %v", err)
+	}
+	// Prestart, not createRuntime: that is the contract the hook is written for.
+	if spec.Hooks == nil || len(spec.Hooks.Prestart) != 1 {
+		t.Fatalf("prestart hook missing: %+v", spec.Hooks)
+	}
+	if spec.Hooks.Prestart[0].Path != fake {
+		t.Errorf("hook path = %q, want %q", spec.Hooks.Prestart[0].Path, fake)
+	}
+	if len(spec.Hooks.CreateRuntime) != 0 {
+		t.Error("hook went to the wrong lifecycle list")
+	}
+}
+
+func TestInjectNVIDIAHookExplainsAMissingToolkit(t *testing.T) {
+	t.Setenv("LIGHTPOD_NVIDIA_HOOK", t.TempDir()+"/absent")
+	if err := InjectNVIDIAHook(newSpec()); err == nil {
+		t.Fatal("expected an error when the hook is missing")
 	}
 }

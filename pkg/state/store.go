@@ -62,11 +62,8 @@ func ValidateID(id string) error {
 	return nil
 }
 
-// withLock serialises writers on a single lock file.
-//
-// The atomic rename in Save keeps readers from seeing a half-written record,
-// but it does not stop two `create` calls racing on the same id: both would
-// check, both would find nothing, both would write. flock closes that.
+// withLock serialises writers. The atomic rename in Save protects readers, but
+// two creates racing on the same id would both find it free.
 func (s *Store) withLock(fn func() error) error {
 	f, err := os.OpenFile(filepath.Join(s.root, ".lock"), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {

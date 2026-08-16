@@ -61,8 +61,7 @@ func Default(rootfs string, args []string, rootless bool) *Spec {
 		{Type: CgroupNamespace},
 	}
 	if rootless {
-		// Mandatory, not optional: without it an unprivileged process can't
-		// create any of the others.
+
 		namespaces = append([]LinuxNamespace{{Type: UserNamespace}}, namespaces...)
 	}
 

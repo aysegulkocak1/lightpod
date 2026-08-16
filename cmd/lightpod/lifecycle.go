@@ -57,6 +57,10 @@ func cmdCreate(opts *globalOptions, args []string) error {
 	if err != nil {
 		return err
 	}
+	spec, err = applyGPU(bundle, id, spec, rf.gpu)
+	if err != nil {
+		return err
+	}
 
 	c, err := runtime.New(id, bundle, spec, mode, store)
 	if err != nil {
@@ -121,7 +125,11 @@ func cmdKill(opts *globalOptions, args []string) error {
 	if fs.NArg() < 1 {
 		return fmt.Errorf("kill needs a container id")
 	}
-	_ = all // whole-container signalling needs the cgroup freezer; TODO
+	if *all {
+		// Signalling every process needs the cgroup's process list.
+		return fmt.Errorf("--all is not implemented yet: lightpod would signal only " +
+			"the container's init process, not every process in it. Run without it")
+	}
 
 	sig := syscall.SIGTERM
 	if fs.NArg() > 1 {
@@ -195,8 +203,8 @@ func cmdPs(opts *globalOptions, args []string) error {
 
 // cmdPrune removes records for containers that are no longer running.
 //
-// A lightpod killed mid-run leaves its record behind and that id stays unusable.
-// On a device restarting a container under a fixed name, one crash wedges it.
+// A lightpod killed mid-run leaves its record behind, and that id stays
+// unusable — one crash wedges a container that restarts under a fixed name.
 func cmdPrune(opts *globalOptions, args []string) error {
 	fs := flag.NewFlagSet("prune", flag.ContinueOnError)
 	dryRun := fs.Bool("dry-run", false, "list what would be removed without removing it")
@@ -223,8 +231,7 @@ func cmdPrune(opts *globalOptions, args []string) error {
 			removed++
 			continue
 		}
-		// Through the container handle, so the cgroup and poststop hooks get
-		// cleaned up too and not just the record.
+		// Through the handle, so the cgroup and poststop hooks are cleaned up too.
 		c, err := loadContainer(opts, record.ID)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "lightpod: %s: %v\n", record.ID, err)

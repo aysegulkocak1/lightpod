@@ -105,9 +105,8 @@ func TestRootfullMountsRealSysfs(t *testing.T) {
 	requireRoot(t)
 	env := setup(t)
 
-	// Rootless has to bind the host's /sys, which drags every submount along.
-	// Rootfull mounts a fresh sysfs, so the mount table is much shorter — a
-	// cheap signal that the rootfull path really was taken.
+	// Rootless binds the host's /sys and drags every submount along. Rootfull
+	// mounts a fresh sysfs, so the table is much shorter.
 	report := env.runCheck(t, "rootfull-mounts")
 	if report.MountCount > 30 {
 		t.Errorf("rootfull container has %d mounts; expected a fresh sysfs, not the host's tree",

@@ -178,9 +178,7 @@ func (c *Container) Create() (err error) {
 	cmd.ExtraFiles = []*os.File{configR, childSock, fifo}
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags: flags,
-		// Not using SysProcAttr.UidMappings: Go's version can't call newuidmap,
-		// so it can't map a /etc/subuid range, which would pin every rootless
-		// container to a single uid. We write the maps ourselves after the clone.
+
 		Setsid: true,
 	}
 	// /proc/self/exe rather than a path on disk — the kernel guarantees it's
@@ -329,9 +327,6 @@ func (c *Container) Start() error {
 }
 
 // Run creates, starts and waits in the foreground.
-//
-// The edge-device path: one process, no daemon, exit code forwarded. Reuses
-// Create and Start instead of shortcutting, so there's one setup sequence to audit.
 func (c *Container) Run() (int, error) {
 	if err := c.Create(); err != nil {
 		return 1, err

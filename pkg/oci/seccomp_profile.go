@@ -50,9 +50,8 @@ var defaultAllowedSyscalls = []string{
 	// scheduling and identity
 	//
 	// The RT calls are allowed on purpose: robotics control loops need
-	// SCHED_FIFO, and blocking them bought nothing since sched_setattr does the
-	// same job and was always allowed. CAP_SYS_NICE is the real gate, and it is
-	// not in the default set.
+	// SCHED_FIFO, and sched_setattr does the same job anyway. CAP_SYS_NICE is
+	// the real gate and it is not in the default set.
 	"sched_yield", "sched_getaffinity", "sched_setaffinity", "sched_getparam",
 	"sched_setparam", "sched_getscheduler", "sched_setscheduler",
 	"sched_get_priority_max", "sched_get_priority_min", "sched_rr_get_interval",

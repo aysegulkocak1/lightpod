@@ -94,9 +94,7 @@ func applyMountFlags(spec *oci.Spec, rf *runFlags) error {
 	case "":
 	case "host":
 		// Joining the host IPC namespace is what lets DDS shared-memory
-		// transport work between the host and the container. It is a real
-		// reduction in isolation — System V IPC and POSIX message queues become
-		// shared — so it stays opt-in and noisy.
+		// transport work between the host and the container.
 		fmt.Fprintln(os.Stderr, "lightpod: WARNING: --ipc host shares the host IPC namespace; container and host can see each other's shared memory")
 		if spec.Linux == nil {
 			spec.Linux = &oci.Linux{}
@@ -123,9 +121,7 @@ func parseVolume(value string) (oci.Mount, error) {
 		return oci.Mount{}, fmt.Errorf("volume %q: both paths must be absolute", value)
 	}
 
-	// nosuid and nodev on every volume: a data directory has no business
-	// carrying setuid binaries or device nodes into the container, and mounting
-	// one that does is a classic way to hand over host privileges.
+	// nosuid and nodev on every volume:
 	options := []string{"rbind", "nosuid", "nodev"}
 	mode := "rw"
 	if len(parts) == 3 {
@@ -148,9 +144,6 @@ func parseVolume(value string) (oci.Mount, error) {
 }
 
 // resizeShm rewrites the size option on the /dev/shm mount.
-//
-// The 64MB default is fine for most things and far too small for ROS 2: Fast
-// DDS puts its shared-memory segments there and runs out silently.
 func resizeShm(spec *oci.Spec, size int64) error {
 	for i := range spec.Mounts {
 		if spec.Mounts[i].Destination != "/dev/shm" {
@@ -180,40 +173,26 @@ func setNamespacePath(spec *oci.Spec, kind oci.LinuxNamespaceType, path string) 
 	return nil
 }
 
-// applyDeviceFlags resolves --device values, which are either host paths or CDI
-// names.
-//
-// CDI lookup is lazy: the registry is only read when a CDI name actually
-// appears, so a machine with no /etc/cdi pays nothing.
+// applyDeviceFlags handles --device host paths and --gpu.
 func applyDeviceFlags(spec *oci.Spec, rf *runFlags) error {
-	if len(rf.devices) == 0 {
-		return nil
-	}
-	if spec.Linux == nil {
+	if len(rf.devices) > 0 && spec.Linux == nil {
 		spec.Linux = &oci.Linux{}
 	}
 
-	var registry *device.Registry
 	for _, value := range rf.devices {
-		if device.IsCDIName(value) {
-			if registry == nil {
-				var err error
-				registry, err = device.LoadRegistry(device.DefaultSpecDirs)
-				if err != nil {
-					return err
-				}
-			}
-			if err := registry.Inject(spec, value); err != nil {
-				return err
-			}
-			continue
+		if !strings.HasPrefix(value, "/") {
+			return fmt.Errorf("--device %q must be a host path like /dev/video0 "+
+				"(for GPUs use --gpu)", value)
 		}
-
 		dev, err := device.ParseRawDevice(value)
 		if err != nil {
 			return err
 		}
 		spec.Linux.Devices = append(spec.Linux.Devices, dev)
 	}
-	return nil
+
+	if rf.gpu == "" {
+		return nil
+	}
+	return device.SetNVIDIAEnv(spec, rf.gpu)
 }
