@@ -10,9 +10,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
 )
 
 type report struct {
@@ -29,7 +31,36 @@ type report struct {
 	SysrqWritable   bool     `json:"sysrqWritable"`
 	MountAllowed    bool     `json:"mountAllowed"`
 	HostRootVisible bool     `json:"hostRootVisible"`
+	ShmSizeKB       int      `json:"shmSizeKB,omitempty"`
+	RTSyscallOK     bool     `json:"rtSyscallOK"`
+	RTFifoOK        bool     `json:"rtFifoOK"`
 	Errors          []string `json:"errors,omitempty"`
+}
+
+// setScheduler calls sched_setscheduler on ourselves.
+func setScheduler(policy int, priority int32) syscall.Errno {
+	param := struct{ priority int32 }{priority: priority}
+	_, _, errno := syscall.Syscall(syscall.SYS_SCHED_SETSCHEDULER,
+		uintptr(os.Getpid()), uintptr(policy), uintptr(unsafe.Pointer(&param)))
+	return errno
+}
+
+// probeRealTime separates the two reasons sched_setscheduler can fail.
+//
+// Seccomp denial and capability denial both return EPERM, so one call can't
+// tell them apart. SCHED_OTHER needs no capability, so if that fails the filter
+// is the only thing left to blame. SCHED_FIFO then answers whether
+// CAP_SYS_NICE is held.
+func probeRealTime(r *report) {
+	const schedOther, schedFIFO = 0, 1
+
+	r.RTSyscallOK = setScheduler(schedOther, 0) == 0
+	r.RTFifoOK = setScheduler(schedFIFO, 1) == 0
+	if r.RTFifoOK {
+		// Do not stay real-time; the rest of this program is not worth the host's
+		// whole CPU.
+		setScheduler(schedOther, 0)
+	}
 }
 
 func main() {
@@ -62,6 +93,45 @@ func main() {
 		}
 		fmt.Printf("reached %dMB without being killed\n", len(held)*8)
 		return
+	}
+
+	// Small probes the volume and device tests drive. They print a fixed token
+	// so the test asserts on behaviour rather than on an error string.
+	if len(os.Args) > 2 {
+		switch os.Args[1] {
+		case "readfile":
+			data, err := os.ReadFile(os.Args[2])
+			if err != nil {
+				fmt.Println("read-failed:", err)
+				return
+			}
+			fmt.Println(string(data))
+			return
+		case "writefile":
+			if err := os.WriteFile(os.Args[2], []byte("x"), 0o644); err != nil {
+				fmt.Println("write-failed:", err)
+				return
+			}
+			fmt.Println("write-ok")
+			return
+		case "readdev":
+			f, err := os.Open(os.Args[2])
+			if err != nil {
+				fmt.Println("device-open-failed:", err)
+				return
+			}
+			defer f.Close()
+			buf := make([]byte, 8)
+			if _, err := f.Read(buf); err != nil {
+				fmt.Println("device-read-failed:", err)
+				return
+			}
+			fmt.Println("device-readable")
+			return
+		case "printenv":
+			fmt.Println(os.Getenv(os.Args[2]))
+			return
+		}
 	}
 
 	r := report{Pid: os.Getpid(), UID: os.Getuid()}
@@ -131,9 +201,33 @@ func main() {
 		}
 	}
 
+	r.ShmSizeKB = shmSizeKB()
+	probeRealTime(&r)
+
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(r)
+}
+
+// shmSizeKB reads the size= option the /dev/shm tmpfs was mounted with.
+func shmSizeKB() int {
+	data, err := os.ReadFile("/proc/self/mounts")
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 4 || fields[1] != "/dev/shm" {
+			continue
+		}
+		for _, opt := range strings.Split(fields[3], ",") {
+			if value, ok := strings.CutPrefix(opt, "size="); ok {
+				n, _ := strconv.Atoi(strings.TrimSuffix(value, "k"))
+				return n
+			}
+		}
+	}
+	return 0
 }
 
 func readStatus() []string {
