@@ -93,8 +93,7 @@ func CompileSeccomp(profile *oci.LinuxSeccomp) ([]sockFilter, error) {
 	// straight past the allowlist.
 	//
 	// The kill sits right after the comparison to keep every jump offset at 0
-	// or 1 — they're 8-bit, and targets at the end of the program would
-	// overflow once the profile grows past 255 instructions.
+	// or 1
 	filter = append(filter,
 		sockFilter{code: opLoadAbsWord, k: offsetArch},
 		sockFilter{code: opJumpEqual, jt: 1, jf: 0, k: auditArch},
@@ -112,8 +111,7 @@ func CompileSeccomp(profile *oci.LinuxSeccomp) ([]sockFilter, error) {
 
 	for i, rule := range profile.Syscalls {
 		if len(rule.Args) > 0 {
-			// Ignoring the condition would widen a narrow rule, i.e. a weaker
-			// sandbox than was written. Refuse instead.
+			// Ignoring the condition would widen a narrow rule.
 			return nil, fmt.Errorf("syscalls[%d]: argument-conditional rules are not supported yet", i)
 		}
 		action, err := actionValue(rule.Action, rule.ErrnoRet)

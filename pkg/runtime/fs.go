@@ -7,6 +7,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/aysegulkocak1/lightpod/pkg/device"
 	"github.com/aysegulkocak1/lightpod/pkg/oci"
 )
 
@@ -245,7 +246,7 @@ func mknodDevice(target string, dev oci.LinuxDevice) error {
 	}
 	mode |= perm & 0o7777
 
-	if err := syscall.Mknod(target, mode, int(mkdev(dev.Major, dev.Minor))); err != nil {
+	if err := syscall.Mknod(target, mode, int(device.Mkdev(dev.Major, dev.Minor))); err != nil {
 		if os.IsExist(err) {
 			return nil
 		}
@@ -283,11 +284,6 @@ func bindDevice(target string, dev oci.LinuxDevice) error {
 		return fmt.Errorf("bind mounting device %s: %w", dev.Path, err)
 	}
 	return nil
-}
-
-// mkdev encodes a major/minor pair the way makedev(3) does.
-func mkdev(major, minor int64) uint64 {
-	return uint64((major&0xfff)<<8&0xfff00 | (minor & 0xff) | ((minor &^ 0xff) << 12))
 }
 
 // Links POSIX software expects under /dev.

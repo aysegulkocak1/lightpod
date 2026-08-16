@@ -9,30 +9,17 @@ import (
 )
 
 // syncType is a step in the parent/child handshake.
-//
-// The container can't just be forked and forgotten — some setup happens on the
-// host while the child waits (id maps, cgroup, runtime-namespace hooks), some
-// in the child between two host steps. This makes the ordering explicit instead
-// of racy.
 type syncType string
 
 const (
-	// Child is in its namespaces, hasn't done anything else yet.
 	syncNsReady syncType = "nsReady"
 
-	// Parent wrote uid_map/gid_map and put the child in its cgroup. Before this
-	// the child has no usable identity.
 	syncMapsReady syncType = "mapsReady"
 
-	// Mounts are done, pivot hasn't happened. The only moment createRuntime
-	// hooks are useful — nvidia-container-cli injects here, while the rootfs is
-	// still reachable at its host path.
 	syncHookPoint syncType = "hookPoint"
 
 	syncHooksDone syncType = "hooksDone"
 
-	// Setup done, about to block for start. Sent before seccomp — installing a
-	// filter is privileged, and the filter would otherwise have to allow it.
 	syncProcReady syncType = "procReady"
 
 	syncError syncType = "error"

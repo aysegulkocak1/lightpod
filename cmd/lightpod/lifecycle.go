@@ -57,6 +57,10 @@ func cmdCreate(opts *globalOptions, args []string) error {
 	if err != nil {
 		return err
 	}
+	spec, err = applyGPU(bundle, id, spec, rf.gpu)
+	if err != nil {
+		return err
+	}
 
 	c, err := runtime.New(id, bundle, spec, mode, store)
 	if err != nil {
@@ -121,7 +125,11 @@ func cmdKill(opts *globalOptions, args []string) error {
 	if fs.NArg() < 1 {
 		return fmt.Errorf("kill needs a container id")
 	}
-	_ = all // whole-container signalling needs the cgroup freezer; TODO
+	if *all {
+		// Signalling every process needs the cgroup's process list.
+		return fmt.Errorf("--all is not implemented yet: lightpod would signal only " +
+			"the container's init process, not every process in it. Run without it")
+	}
 
 	sig := syscall.SIGTERM
 	if fs.NArg() > 1 {
@@ -191,6 +199,56 @@ func cmdPs(opts *globalOptions, args []string) error {
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", c.ID, pid, c.Status, c.Created, c.Bundle)
 	}
 	return w.Flush()
+}
+
+// cmdPrune removes records for containers that are no longer running.
+//
+// A lightpod killed mid-run leaves its record behind, and that id stays
+// unusable — one crash wedges a container that restarts under a fixed name.
+func cmdPrune(opts *globalOptions, args []string) error {
+	fs := flag.NewFlagSet("prune", flag.ContinueOnError)
+	dryRun := fs.Bool("dry-run", false, "list what would be removed without removing it")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	store, _, err := openStore(opts)
+	if err != nil {
+		return err
+	}
+	containers, err := store.List()
+	if err != nil {
+		return err
+	}
+
+	var removed int
+	for _, record := range containers {
+		if record.Status != oci.StatusStopped {
+			continue
+		}
+		if *dryRun {
+			fmt.Println(record.ID)
+			removed++
+			continue
+		}
+		// Through the handle, so the cgroup and poststop hooks are cleaned up too.
+		c, err := loadContainer(opts, record.ID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "lightpod: %s: %v\n", record.ID, err)
+			continue
+		}
+		if err := c.Delete(false); err != nil {
+			fmt.Fprintf(os.Stderr, "lightpod: %s: %v\n", record.ID, err)
+			continue
+		}
+		fmt.Println(record.ID)
+		removed++
+	}
+
+	if removed == 0 {
+		fmt.Fprintln(os.Stderr, "nothing to prune")
+	}
+	return nil
 }
 
 // loadContainer rebuilds a handle for an existing container.

@@ -43,26 +43,6 @@ func DetectPrivilegeMode() PrivilegeMode {
 	return ModeRootless
 }
 
-// ParsePrivilegeMode handles an explicit --rootless/--rootfull.
-//
-// Asking for rootfull without being root is an error, not a silent downgrade —
-// better than finding out when the GPU turns out to be missing.
-func ParsePrivilegeMode(s string) (PrivilegeMode, error) {
-	switch s {
-	case "", "auto":
-		return DetectPrivilegeMode(), nil
-	case "rootless":
-		return ModeRootless, nil
-	case "rootfull", "rootful":
-		if os.Geteuid() != 0 {
-			return 0, fmt.Errorf("rootfull mode requires uid 0, but lightpod is running as uid %d", os.Geteuid())
-		}
-		return ModeRootfull, nil
-	default:
-		return 0, fmt.Errorf("unknown privilege mode %q (want auto, rootless or rootfull)", s)
-	}
-}
-
 // StateRoot holds per-container state. Wants to be on a tmpfs so a crash
 // doesn't leave phantom containers behind after a power cycle — which is how
 // edge devices normally restart.

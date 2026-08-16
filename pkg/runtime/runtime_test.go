@@ -254,11 +254,15 @@ func TestPrivilegeModeStateRootDiffers(t *testing.T) {
 	}
 }
 
-func TestParsePrivilegeModeRejectsRootfullWithoutRoot(t *testing.T) {
+func TestDetectPrivilegeModeFollowsEffectiveUID(t *testing.T) {
+	// The mode is not selectable: sudo means rootfull, no sudo means rootless.
+	// A flag for it only invited people to ask for something the kernel would
+	// refuse anyway.
+	want := ModeRootless
 	if os.Geteuid() == 0 {
-		t.Skip("running as root; this check only applies to unprivileged users")
+		want = ModeRootfull
 	}
-	if _, err := ParsePrivilegeMode("rootfull"); err == nil {
-		t.Fatal("expected an error asking for rootfull as an unprivileged user, got nil")
+	if got := DetectPrivilegeMode(); got != want {
+		t.Fatalf("DetectPrivilegeMode() = %v, want %v for uid %d", got, want, os.Geteuid())
 	}
 }

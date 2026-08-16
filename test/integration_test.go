@@ -1,10 +1,10 @@
 //go:build integration
 
-// End-to-end tests that start real containers.
+// End-to-end tests for the rootless path.
 //
 // Behind a build tag because they create namespaces, mounts and cgroups — slow,
 // and they need an unprivileged user namespace. The pkg/ unit tests cover what
-// can be checked without a kernel.
+// can be checked without a kernel. Shared helpers live in helpers_test.go.
 //
 //	go test -tags integration ./test/...
 package test
@@ -12,122 +12,11 @@ package test
 import (
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
-
-// What isolationcheck reports from inside. The only source worth trusting —
-// asserting on the runtime's own logs is just the runtime agreeing with itself.
-type isolationReport struct {
-	Pid             int    `json:"pid"`
-	Hostname        string `json:"hostname"`
-	UID             int    `json:"uid"`
-	VisibleProcs    int    `json:"visibleProcs"`
-	NoNewPrivs      string `json:"noNewPrivs"`
-	Seccomp         string `json:"seccomp"`
-	CapEff          string `json:"capEff"`
-	CapBnd          string `json:"capBnd"`
-	KcoreReadable   bool   `json:"kcoreReadable"`
-	SysrqWritable   bool   `json:"sysrqWritable"`
-	MountAllowed    bool   `json:"mountAllowed"`
-	HostRootVisible bool   `json:"hostRootVisible"`
-}
-
-// testEnv is a built lightpod binary plus a single-binary rootfs.
-type testEnv struct {
-	lightpod string
-	rootfs   string
-	stateDir string
-}
-
-// setup builds what the tests need. The rootfs is a single static binary rather
-// than a distro image, so there's nothing to download — same constraint the
-// target devices have.
-func setup(t *testing.T) *testEnv {
-	t.Helper()
-
-	dir := t.TempDir()
-	env := &testEnv{
-		lightpod: filepath.Join(dir, "lightpod"),
-		rootfs:   filepath.Join(dir, "rootfs"),
-		stateDir: filepath.Join(dir, "state"),
-	}
-
-	if err := os.MkdirAll(env.rootfs, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	build := exec.Command("go", "build", "-o", env.lightpod, "../cmd/lightpod")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("building lightpod: %v\n%s", err, out)
-	}
-
-	check := exec.Command("go", "build", "-o", filepath.Join(env.rootfs, "check"), "./isolationcheck")
-	check.Env = append(os.Environ(), "CGO_ENABLED=0")
-	if out, err := check.CombinedOutput(); err != nil {
-		t.Fatalf("building isolationcheck: %v\n%s", err, out)
-	}
-
-	return env
-}
-
-func (e *testEnv) run(t *testing.T, args ...string) (string, string, error) {
-	t.Helper()
-	full := append([]string{"--root", e.stateDir}, args...)
-	cmd := exec.Command(e.lightpod, full...)
-	var stdout, stderr strings.Builder
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	return stdout.String(), stderr.String(), err
-}
-
-// runDetached uses real files for stdio instead of pipes.
-//
-// A created container inherits the caller's stdout/stderr and holds them — the
-// runc contract podman and nvidia-container-runtime rely on. With os/exec's
-// pipe capture the parent waits for EOF, so it waits for the container, and
-// `create` looks like it hangs. Real supervisors hand over files or FIFOs they
-// manage themselves; this models that.
-func (e *testEnv) runDetached(t *testing.T, args ...string) (string, error) {
-	t.Helper()
-
-	out, err := os.CreateTemp(t.TempDir(), "stdio")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer out.Close()
-
-	full := append([]string{"--root", e.stateDir}, args...)
-	cmd := exec.Command(e.lightpod, full...)
-	cmd.Stdout = out
-	cmd.Stderr = out
-	runErr := cmd.Run()
-
-	data, _ := os.ReadFile(out.Name())
-	return string(data), runErr
-}
-
-// runCheck starts a container that reports on its own isolation.
-func (e *testEnv) runCheck(t *testing.T, id string, extra ...string) isolationReport {
-	t.Helper()
-	args := append([]string{"run", "--rootfs", e.rootfs, "--cgroup", "none"}, extra...)
-	args = append(args, id, "/check")
-
-	stdout, stderr, err := e.run(t, args...)
-	if err != nil {
-		t.Fatalf("running container: %v\nstderr: %s", err, stderr)
-	}
-
-	var report isolationReport
-	if err := json.Unmarshal([]byte(stdout), &report); err != nil {
-		t.Fatalf("parsing isolation report: %v\nstdout: %s\nstderr: %s", err, stdout, stderr)
-	}
-	return report
-}
 
 func TestContainerIsolation(t *testing.T) {
 	env := setup(t)
@@ -168,8 +57,7 @@ func TestContainerSecurityPosture(t *testing.T) {
 		t.Error("/proc/sysrq-trigger is writable — the container can panic or reboot the host")
 	}
 
-	// Catches the capability policy silently no-opping, which is exactly what an
-	// earlier version of this runtime did.
+	// Catches the capability policy silently no-opping.
 	if report.CapEff == "0000003fffffffff" || report.CapEff == "000001ffffffffff" {
 		t.Errorf("CapEff = %s — the container holds a full capability set", report.CapEff)
 	}
@@ -366,5 +254,161 @@ func TestRejectsBundleEscapingRootfs(t *testing.T) {
 	if _, _, err := env.run(t, "create", "--bundle", bundle, "escape"); err == nil {
 		env.run(t, "delete", "--force", "escape")
 		t.Fatal("a bundle whose root.path escapes the bundle directory was accepted")
+	}
+}
+
+func TestVolumeMount(t *testing.T) {
+	env := setup(t)
+
+	data := t.TempDir()
+	if err := os.WriteFile(filepath.Join(data, "model.bin"), []byte("weights"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The whole point of -v for this project: getting a model or a dataset into
+	// the container without baking it into the image.
+	stdout, stderr, err := env.run(t, "run", "--rootfs", env.rootfs, "--cgroup", "none",
+		"-v", data+":/data:ro", "vol", "/check", "readfile", "/data/model.bin")
+	if err != nil {
+		t.Fatalf("running container: %v\nstderr: %s", err, stderr)
+	}
+	if !strings.Contains(stdout, "weights") {
+		t.Fatalf("volume content not visible inside the container: %q", stdout)
+	}
+
+	// :ro has to actually be read-only. A bind that silently stays writable is
+	// how a container corrupts the host's dataset.
+	stdout, _, err = env.run(t, "run", "--rootfs", env.rootfs, "--cgroup", "none",
+		"-v", data+":/data:ro", "volro", "/check", "writefile", "/data/new")
+	if err != nil {
+		t.Fatalf("running container: %v", err)
+	}
+	if !strings.Contains(stdout, "write-failed") {
+		t.Fatalf("read-only volume accepted a write: %q", stdout)
+	}
+}
+
+func TestRawDevicePassthrough(t *testing.T) {
+	env := setup(t)
+
+	// /dev/urandom stands in for a camera or serial port: same code path, but
+	// present on every machine.
+	stdout, stderr, err := env.run(t, "run", "--rootfs", env.rootfs, "--cgroup", "none",
+		"--device", "/dev/urandom", "dev", "/check", "readdev", "/dev/urandom")
+	if err != nil {
+		t.Fatalf("running container: %v\nstderr: %s", err, stderr)
+	}
+	if !strings.Contains(stdout, "device-readable") {
+		t.Fatalf("passed-through device was not readable: %q", stdout)
+	}
+}
+
+func TestRealTimeSyscallReachesTheCapabilityGate(t *testing.T) {
+	env := setup(t)
+	report := env.runCheck(t, "rt")
+
+	// SCHED_OTHER needs no capability, so a failure here means seccomp blocked
+	// the syscall.
+	if !report.RTSyscallOK {
+		t.Error("sched_setscheduler is blocked by seccomp; real-time workloads cannot start")
+	}
+	// And the real gate must still be shut.
+	if report.RTFifoOK {
+		t.Error("SCHED_FIFO succeeded without CAP_SYS_NICE; the capability gate is open")
+	}
+}
+
+func TestRealTimeWorksWithCapability(t *testing.T) {
+	env := setup(t)
+	report := env.runCheck(t, "rtcap", "--cap-add", "CAP_SYS_NICE")
+
+	if !report.RTFifoOK {
+		t.Skipf("SCHED_FIFO still denied with CAP_SYS_NICE; this kernel likely has "+
+			"CONFIG_RT_GROUP_SCHED and needs an RT budget (capEff=%s)", report.CapEff)
+	}
+}
+
+func TestShmSizeIsConfigurable(t *testing.T) {
+	env := setup(t)
+
+	// ROS 2's DDS puts shared-memory segments in /dev/shm and runs out quietly
+	// at the 64MB default.
+	def := env.runCheck(t, "shmdef")
+	if def.ShmSizeKB != 65536 {
+		t.Errorf("default /dev/shm = %dKB, want 65536", def.ShmSizeKB)
+	}
+
+	big := env.runCheck(t, "shmbig", "--shm-size", "256m")
+	if big.ShmSizeKB != 262144 {
+		t.Errorf("--shm-size 256m gave %dKB, want 262144", big.ShmSizeKB)
+	}
+}
+
+func TestTTYFlagFailsLoudly(t *testing.T) {
+	env := setup(t)
+
+	// A flag that silently does nothing is worse than a missing one.
+	_, stderr, err := env.run(t, "run", "--rootfs", env.rootfs, "--cgroup", "none",
+		"--tty", "ttytest", "/check")
+	if err == nil {
+		t.Fatal("--tty was accepted even though no pty is allocated")
+	}
+	if !strings.Contains(stderr, "not implemented") {
+		t.Errorf("error should say the flag is unimplemented, got: %s", stderr)
+	}
+}
+
+func TestPruneFreesAStaleID(t *testing.T) {
+	env := setup(t)
+
+	if _, err := env.runDetached(t, "create", "--rootfs", env.rootfs, "--cgroup", "none",
+		"stale", "/check", "sleep", "1"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, stderr, err := env.run(t, "start", "stale"); err != nil {
+		t.Fatalf("start: %v\n%s", err, stderr)
+	}
+
+	// Wait for it to exit on its own, the way a crashed container would.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		stdout, _, err := env.run(t, "state", "stale")
+		if err == nil && strings.Contains(stdout, `"stopped"`) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// The id is taken until the record goes away.
+	if _, err := env.runDetached(t, "create", "--rootfs", env.rootfs, "--cgroup", "none",
+		"stale", "/check", "sleep", "1"); err == nil {
+		t.Fatal("a stopped container's id was reusable without prune")
+	}
+
+	stdout, stderr, err := env.run(t, "prune")
+	if err != nil {
+		t.Fatalf("prune: %v\n%s", err, stderr)
+	}
+	if !strings.Contains(stdout, "stale") {
+		t.Fatalf("prune did not report removing the container: %q", stdout)
+	}
+
+	if _, err := env.runDetached(t, "create", "--rootfs", env.rootfs, "--cgroup", "none",
+		"stale", "/check", "sleep", "1"); err != nil {
+		t.Fatalf("id still unusable after prune: %v", err)
+	}
+	env.run(t, "delete", "--force", "stale")
+}
+
+func TestEnvAndWorkdir(t *testing.T) {
+	env := setup(t)
+
+	stdout, stderr, err := env.run(t, "run", "--rootfs", env.rootfs, "--cgroup", "none",
+		"-e", "ROS_DOMAIN_ID=42", "--workdir", "/", "envtest", "/check", "printenv", "ROS_DOMAIN_ID")
+	if err != nil {
+		t.Fatalf("running container: %v\nstderr: %s", err, stderr)
+	}
+	if !strings.Contains(stdout, "42") {
+		t.Fatalf("--env did not reach the container: %q", stdout)
 	}
 }

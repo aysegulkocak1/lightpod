@@ -62,6 +62,36 @@ func ValidateID(id string) error {
 	return nil
 }
 
+// withLock serialises writers. The atomic rename in Save protects readers, but
+// two creates racing on the same id would both find it free.
+func (s *Store) withLock(fn func() error) error {
+	f, err := os.OpenFile(filepath.Join(s.root, ".lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("opening store lock: %w", err)
+	}
+	defer f.Close()
+
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("locking store: %w", err)
+	}
+	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+
+	return fn()
+}
+
+// Create claims an id and writes the first record, failing if it is taken.
+func (s *Store) Create(c *Container) error {
+	if err := ValidateID(c.ID); err != nil {
+		return err
+	}
+	return s.withLock(func() error {
+		if existing, err := s.Load(c.ID); err == nil {
+			return fmt.Errorf("container %q already exists (%s)", c.ID, existing.Status)
+		}
+		return s.Save(c)
+	})
+}
+
 // Save writes a record, replacing any previous one. Temp file then rename, so a
 // concurrent reader gets the old record or the new one, never a half-written
 // file that parses as a container with no pid.
@@ -155,10 +185,12 @@ func (s *Store) Delete(id string) error {
 	if err := ValidateID(id); err != nil {
 		return err
 	}
-	if err := os.RemoveAll(s.Dir(id)); err != nil {
-		return fmt.Errorf("removing state for %s: %w", id, err)
-	}
-	return nil
+	return s.withLock(func() error {
+		if err := os.RemoveAll(s.Dir(id)); err != nil {
+			return fmt.Errorf("removing state for %s: %w", id, err)
+		}
+		return nil
+	})
 }
 
 // processAlive: signal 0 does the existence and permission checks without

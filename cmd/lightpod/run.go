@@ -24,6 +24,51 @@ type runFlags struct {
 	seccomp  string
 	readonly bool
 	tty      bool
+	shmSize  string
+	ipc      string
+	workdir  string
+	user     string
+	gpu      string
+	volumes  repeatedFlag
+	devices  repeatedFlag
+	env      repeatedFlag
+	addCaps  repeatedFlag
+}
+
+// repeatedFlag collects a flag given more than once, like -v and --device.
+type repeatedFlag []string
+
+func (r *repeatedFlag) String() string { return strings.Join(*r, ",") }
+
+func (r *repeatedFlag) Set(value string) error {
+	*r = append(*r, value)
+	return nil
+}
+
+// registerRunFlags wires the shared flag set used by both run and create, so
+// the two commands cannot drift apart.
+func registerRunFlags(fs *flag.FlagSet, rf *runFlags) {
+	fs.StringVar(&rf.bundle, "bundle", "", "OCI bundle directory containing config.json")
+	fs.StringVar(&rf.rootfs, "rootfs", "", "root filesystem directory (generates a bundle with secure defaults)")
+	fs.Var(&rf.volumes, "v", "bind mount, host:container[:ro] (repeatable)")
+	fs.Var(&rf.volumes, "volume", "bind mount, host:container[:ro] (repeatable)")
+	fs.Var(&rf.devices, "device", "host device to expose, e.g. /dev/video0[:rw] (repeatable)")
+	fs.StringVar(&rf.gpu, "gpu", "", "NVIDIA GPUs to expose: all, or indices like 0 or 0,1")
+	fs.Var(&rf.env, "env", "environment variable, KEY=VALUE (repeatable)")
+	fs.Var(&rf.env, "e", "environment variable, KEY=VALUE (repeatable)")
+	fs.Var(&rf.addCaps, "cap-add", "capability to grant, e.g. CAP_SYS_NICE (repeatable)")
+	fs.StringVar(&rf.user, "user", "", "uid[:gid] to run as")
+	fs.StringVar(&rf.workdir, "workdir", "", "working directory inside the container")
+	fs.StringVar(&rf.memory, "memory", "", "memory limit, e.g. 64m or 1g")
+	fs.Float64Var(&rf.cpus, "cpus", 0, "CPU limit as a fraction of one core, e.g. 1.5")
+	fs.Int64Var(&rf.pids, "pids", 0, "maximum number of processes")
+	fs.StringVar(&rf.shmSize, "shm-size", "", "size of /dev/shm, e.g. 256m (DDS and ROS 2 need more than the 64m default)")
+	fs.StringVar(&rf.ipc, "ipc", "", "set to \"host\" to share the host IPC namespace")
+	fs.StringVar(&rf.hostname, "hostname", "", "container hostname")
+	fs.StringVar(&rf.cgroup, "cgroup", "", "set to \"none\" to run without cgroup limits")
+	fs.StringVar(&rf.seccomp, "seccomp", "", "set to \"unconfined\" to run without a seccomp filter")
+	fs.BoolVar(&rf.readonly, "read-only", false, "mount the container root filesystem read-only")
+	fs.BoolVar(&rf.tty, "tty", false, "allocate a terminal (not implemented yet)")
 }
 
 // cmdRun creates, starts and waits in one command.
@@ -33,16 +78,7 @@ type runFlags struct {
 func cmdRun(opts *globalOptions, args []string) error {
 	var rf runFlags
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
-	fs.StringVar(&rf.bundle, "bundle", "", "OCI bundle directory containing config.json")
-	fs.StringVar(&rf.rootfs, "rootfs", "", "root filesystem directory (generates a bundle with secure defaults)")
-	fs.StringVar(&rf.memory, "memory", "", "memory limit, e.g. 64m or 1g")
-	fs.Float64Var(&rf.cpus, "cpus", 0, "CPU limit as a fraction of one core, e.g. 1.5")
-	fs.Int64Var(&rf.pids, "pids", 0, "maximum number of processes")
-	fs.StringVar(&rf.hostname, "hostname", "", "container hostname")
-	fs.StringVar(&rf.cgroup, "cgroup", "", "set to \"none\" to run without cgroup limits")
-	fs.StringVar(&rf.seccomp, "seccomp", "", "set to \"unconfined\" to run without a seccomp filter")
-	fs.BoolVar(&rf.readonly, "read-only", false, "mount the container root filesystem read-only")
-	fs.BoolVar(&rf.tty, "tty", false, "allocate a terminal for the container")
+	registerRunFlags(fs, &rf)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -60,6 +96,10 @@ func cmdRun(opts *globalOptions, args []string) error {
 	}
 
 	bundle, spec, err := resolveBundle(&rf, command, mode, store.Dir(id))
+	if err != nil {
+		return err
+	}
+	spec, err = applyGPU(bundle, id, spec, rf.gpu)
 	if err != nil {
 		return err
 	}
@@ -154,8 +194,19 @@ func applyRunFlags(spec *oci.Spec, rf *runFlags) error {
 	if rf.readonly && spec.Root != nil {
 		spec.Root.Readonly = true
 	}
-	if rf.tty && spec.Process != nil {
-		spec.Process.Terminal = true
+	if rf.tty {
+		return fmt.Errorf("--tty is not implemented yet: lightpod does not allocate a pty. " +
+			"Run without it, or use `lightpod exec` once that lands")
+	}
+
+	if err := applyProcessFlags(spec, rf); err != nil {
+		return err
+	}
+	if err := applyMountFlags(spec, rf); err != nil {
+		return err
+	}
+	if err := applyDeviceFlags(spec, rf); err != nil {
+		return err
 	}
 
 	if rf.memory != "" {
@@ -178,9 +229,6 @@ func applyRunFlags(spec *oci.Spec, rf *runFlags) error {
 	}
 
 	if rf.seccomp == "unconfined" {
-		// Loud on purpose. You asked for it, but a container running with no
-		// syscall filter shouldn't ever be a silent condition — least of all on
-		// a device in the field.
 		fmt.Fprintln(os.Stderr, "lightpod: WARNING: seccomp is disabled; the container can issue any syscall")
 		spec.Linux.Seccomp = nil
 	}

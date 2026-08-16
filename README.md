@@ -1,8 +1,11 @@
 # lightpod
 
-A daemonless, OCI-compatible container runtime written from scratch. Runs both
-rootfull and rootless. Aimed at IoT, edge and robotics: small, fast, and
-security-first.
+A daemonless container engine written from scratch, for IoT, edge and robotics:
+small, fast, security-first. Runs both rootfull and rootless.
+
+It is built to stand alone — run, list and stop containers with no daemon and no
+higher-level tool. It is also OCI-compatible, so other tools can drive it, but
+that is a compatibility path rather than the reason it exists.
 
 > **Status: `v0.2.0-alpha`.** Isolation, the security layers and the OCI
 > lifecycle work. **No networking and no image pull yet** — containers run from
@@ -63,14 +66,14 @@ To see the policy before running anything:
 ./lightpod delete web
 ```
 
-A created container inherits your stdio and holds it until it exits — that's the
-runc contract podman and nvidia-container-runtime depend on. Redirect to a file
-in scripts, or use `run` for foreground work.
+A created container inherits your stdio and holds it until it exits — the OCI
+behaviour other tools depend on. Redirect to a file in scripts, or use `run` for
+foreground work.
 
 ## Rootfull and rootless
 
-Both are first class, picked automatically, forced with `--rootless` /
-`--rootfull`. The difference isn't cosmetic:
+Both are first class and chosen by the effective uid — run under `sudo` for
+rootfull, there is no flag. The difference isn't cosmetic:
 
 | | rootfull | rootless |
 |---|---|---|
@@ -78,19 +81,48 @@ Both are first class, picked automatically, forced with `--rootless` /
 | cgroup | cgroup2 root | systemd-delegated subtree only |
 | id mapping | not needed | `newuidmap` + `/etc/subuid` |
 | NVIDIA GPU | full | limited |
+| real-time (SCHED_FIFO) | yes, with `--cap-add CAP_SYS_NICE` | no |
+
+Real-time scheduling is the one that surprises people: RT priority is a global
+resource, so the kernel wants CAP_SYS_NICE in the initial user namespace. A
+robotics control loop needs rootfull, the same way a GPU does.
 
 Rootless cgroup limits need systemd delegation. Without it lightpod refuses to
 start and tells you how to enable it, rather than quietly running unlimited.
 `--cgroup=none` if you'd rather accept that.
 
-## GPU
+## GPU and devices
 
-There's no NVIDIA-specific code in here. GPU support comes from sitting under
-nvidia-container-runtime, which rewrites config.json and we apply it:
+lightpod does not touch the GPU itself. It wires in the NVIDIA Container
+Toolkit and lets the toolkit do the work — the same thing Docker's chain does,
+minus Docker:
 
 ```bash
-podman --runtime=$(command -v lightpod) run --device nvidia.com/gpu=0 <image> nvidia-smi
+lightpod run --rootfs ./cuda-app --gpu all gpu /app
+lightpod run --rootfs ./cuda-app --gpu 0,1 gpu /app
 ```
+
+`--gpu` hands the bundle to `nvidia-container-runtime`, the same shim Docker
+uses, and lets it apply its edits — currently CDI, whatever the toolkit
+defaults to. lightpod then runs the container itself, so nothing extra sits in
+the process tree. If the shim is not installed it falls back to the toolkit's
+prestart hook.
+
+Needs the NVIDIA Container Toolkit on the host. `LIGHTPOD_GPU_MODE=runtime|hook`
+pins one path; `LIGHTPOD_NVIDIA_RUNTIME` and `LIGHTPOD_NVIDIA_HOOK` point at
+binaries in unusual places.
+
+Everything else — cameras, serial ports, and accelerators that ship their
+runtime in the image rather than needing driver injection — takes a host path:
+
+```bash
+lightpod run --rootfs ./app --device /dev/video0 --device /dev/ttyUSB0 cam /app
+lightpod run --rootfs ./app --device /dev/hailo0 hailo /app          # Raspberry Pi AI Kit
+lightpod run --rootfs ./app --device /dev/dri/renderD128 vpu /app
+```
+
+lightpod can also be run underneath `nvidia-container-runtime` itself, if you
+already have that wiring. Same result, one more moving part.
 
 ## Tests
 
@@ -106,15 +138,17 @@ runtime's own logs.
 
 - ✅ **M1** — isolation and the security layers
 - ✅ **M2** — OCI verbs, state store, hooks
-- ⬜ **M2.5** — native CDI parsing, device cgroup rules
+- ✅ **M2.5** — volumes, host devices, NVIDIA GPUs via the toolkit's hook
+- ⬜ **M2.6** — cgroup v1 and hybrid support (JetPack 5 and Ubuntu 20.04 need it)
 - ⬜ **M3** — networking (veth/bridge/NAT, rootless user-mode, CNI)
 - ⬜ **M4** — registry pull and overlayfs
 - ⬜ **M5** — pods, systemd units, restart policies
-- ⬜ **M6** — fuzzing, oci-runtime-tools compliance
+- ⬜ **M6** — device cgroup rules, fuzzing, oci-runtime-tools compliance
 
 ## Requirements
 
-Linux 4.18+ with cgroup v2, Go 1.25+. Rootless also needs unprivileged user
+Linux 4.18+, Go 1.25+. Resource limits currently need cgroup v2 (unified); v1
+and hybrid systems are M2.6. Rootless also needs unprivileged user
 namespaces, the `uidmap` package and an `/etc/subuid` entry. Targets amd64 and
 arm64; 32-bit arm is best effort.
 

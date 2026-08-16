@@ -116,12 +116,16 @@ func Adopt(id string, record *state.Container, mode PrivilegeMode, store *state.
 // hook or an orchestrator act on a fully configured container before the
 // workload gets to run.
 func (c *Container) Create() (err error) {
-	if _, err := c.store.Load(c.ID); err == nil {
-		return fmt.Errorf("container %q already exists", c.ID)
-	}
-
-	if err := os.MkdirAll(c.store.Dir(c.ID), 0o700); err != nil {
-		return fmt.Errorf("creating container directory: %w", err)
+	// Claim the id up front under the store lock, so two concurrent creates
+	// cannot both decide it is free.
+	if err := c.store.Create(&state.Container{
+		ID:      c.ID,
+		Bundle:  c.Bundle,
+		Rootfs:  c.Rootfs,
+		Status:  oci.StatusCreating,
+		Created: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		return err
 	}
 	defer func() {
 		if err != nil {
@@ -174,9 +178,7 @@ func (c *Container) Create() (err error) {
 	cmd.ExtraFiles = []*os.File{configR, childSock, fifo}
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags: flags,
-		// Not using SysProcAttr.UidMappings: Go's version can't call newuidmap,
-		// so it can't map a /etc/subuid range, which would pin every rootless
-		// container to a single uid. We write the maps ourselves after the clone.
+
 		Setsid: true,
 	}
 	// /proc/self/exe rather than a path on disk — the kernel guarantees it's
@@ -325,9 +327,6 @@ func (c *Container) Start() error {
 }
 
 // Run creates, starts and waits in the foreground.
-//
-// The edge-device path: one process, no daemon, exit code forwarded. Reuses
-// Create and Start instead of shortcutting, so there's one setup sequence to audit.
 func (c *Container) Run() (int, error) {
 	if err := c.Create(); err != nil {
 		return 1, err
