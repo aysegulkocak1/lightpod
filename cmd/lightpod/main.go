@@ -1,12 +1,9 @@
-// Command lightpod is a daemonless OCI container runtime for edge, IoT and
-// robotics. It speaks the OCI verbs, so it works on its own or underneath
-// podman / nvidia-container-runtime with --runtime=lightpod.
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/aysegulkocak1/lightpod/pkg/runtime"
 	"github.com/aysegulkocak1/lightpod/pkg/state"
@@ -14,14 +11,9 @@ import (
 )
 
 // globalOptions are the flags before the subcommand.
-//
-// Some exist purely for compatibility: podman and nvidia-container-runtime call
-// their runtime with runc's global flags, and rejecting an unknown one fails the
-// whole container. Accepting and ignoring is the difference between working
-// under those tools and not.
+
 type globalOptions struct {
 	root         string
-	privilege    string
 	logFile      string
 	logFormat    string
 	systemdGroup bool
@@ -37,71 +29,38 @@ func main() {
 
 func run(args []string) error {
 	opts := &globalOptions{}
+	fs := flag.NewFlagSet("lightpod", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	fs.Usage = usage
 
-	// Parsed by hand: these come before a subcommand, and flag.Parse stops at
-	// the first non-flag without telling us whose flags are whose.
-	var command string
-	i := 0
-	for ; i < len(args); i++ {
-		arg := args[i]
-		if !strings.HasPrefix(arg, "-") {
-			command = arg
-			i++
-			break
-		}
+	fs.StringVar(&opts.root, "root", "", "state directory")
+	fs.StringVar(&opts.logFile, "log", "", "accepted for runc compatibility")
+	fs.StringVar(&opts.logFormat, "log-format", "", "accepted for runc compatibility")
+	fs.BoolVar(&opts.systemdGroup, "systemd-cgroup", false, "accepted for runc compatibility")
+	fs.BoolVar(&opts.debug, "debug", false, "verbose logging")
+	showVersion := fs.Bool("version", false, "print build information")
+	// runc flags we take and ignore; rejecting one would fail the container when
+	// podman or nvidia-container-runtime passes it.
+	fs.String("criu", "", "accepted for runc compatibility")
+	fs.Bool("rootless-compat", false, "accepted for runc compatibility")
 
-		name, value, hasValue := strings.Cut(strings.TrimLeft(arg, "-"), "=")
-		next := func() (string, error) {
-			if hasValue {
-				return value, nil
-			}
-			if i+1 >= len(args) {
-				return "", fmt.Errorf("flag --%s needs a value", name)
-			}
-			i++
-			return args[i], nil
-		}
-
-		var err error
-		switch name {
-		case "help", "h":
-			usage()
-			return nil
-		case "version", "v":
-			fmt.Println(version.String())
-			return nil
-		case "root":
-			opts.root, err = next()
-		case "privilege", "mode":
-			opts.privilege, err = next()
-		case "rootless":
-			opts.privilege = "rootless"
-		case "rootfull", "rootful":
-			opts.privilege = "rootfull"
-		case "log":
-			opts.logFile, err = next()
-		case "log-format":
-			opts.logFormat, err = next()
-		case "debug":
-			opts.debug = true
-		case "systemd-cgroup":
-			opts.systemdGroup = true
-		case "criu", "rootless-compat":
-			_, err = next() // runc flags with no meaning here
-		default:
-			return fmt.Errorf("unknown global flag --%s", name)
-		}
-		if err != nil {
-			return err
-		}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *showVersion {
+		fmt.Println(version.String())
+		return nil
 	}
 
-	if command == "" {
+	// Parse stops at the first non-flag, so what is left starts with the
+	// subcommand and carries that subcommand's own flags untouched.
+	rest := fs.Args()
+	if len(rest) == 0 {
 		usage()
 		return fmt.Errorf("no command given")
 	}
-
-	rest := args[i:]
+	command := rest[0]
+	rest = rest[1:]
 
 	switch command {
 	case "init":
@@ -124,6 +83,8 @@ func run(args []string) error {
 		return cmdDelete(opts, rest)
 	case "ps", "list":
 		return cmdPs(opts, rest)
+	case "prune":
+		return cmdPrune(opts, rest)
 	case "spec":
 		return cmdSpec(opts, rest)
 	case "help":
@@ -137,15 +98,14 @@ func run(args []string) error {
 	}
 }
 
-// openStore resolves the privilege mode and opens the state directory.
+// openStore picks the privilege mode from the effective uid and opens the
+// state directory.
 func openStore(opts *globalOptions) (*state.Store, runtime.PrivilegeMode, error) {
-	mode, err := runtime.ParsePrivilegeMode(opts.privilege)
-	if err != nil {
-		return nil, 0, err
-	}
+	mode := runtime.DetectPrivilegeMode()
 
 	dir := opts.root
 	if dir == "" {
+		var err error
 		dir, err = mode.StateRoot()
 		if err != nil {
 			return nil, 0, err
@@ -173,19 +133,16 @@ Commands:
   kill    <id> [signal]                    signal a running container (default TERM)
   delete  [--force] <id>                   remove a stopped container
   ps                                       list containers
+  prune   [--dry-run]                      remove records of stopped containers
   spec    [--rootfs <dir>] [command...]    print a config.json with secure defaults
   version                                  print build information
 
 Global flags:
   --root <dir>        state directory (default: /run/lightpod, or
                       $XDG_RUNTIME_DIR/lightpod when rootless)
-  --rootless          run in a user namespace even as root
-  --rootfull          require uid 0; fail instead of falling back to rootless
 
-  The mode is detected from the effective uid, so running under sudo already
-  means rootfull. The two flags above are overrides: --rootless gives a root
-  caller the extra isolation of a user namespace, and --rootfull turns a
-  silent downgrade (and its missing GPU) into an error.
+  Rootless or rootfull is decided by the effective uid: run under sudo to get
+  rootfull. There is no flag for it.
 
   --log <file>        accepted for runc compatibility
   --log-format <fmt>  accepted for runc compatibility

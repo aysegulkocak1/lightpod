@@ -24,10 +24,7 @@ func cmdSpec(opts *globalOptions, args []string) error {
 		return err
 	}
 
-	mode, err := runtime.ParsePrivilegeMode(opts.privilege)
-	if err != nil {
-		return err
-	}
+	mode := runtime.DetectPrivilegeMode()
 
 	command := fs.Args()
 	if len(command) == 0 {

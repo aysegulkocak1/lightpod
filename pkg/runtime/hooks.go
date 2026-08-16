@@ -14,12 +14,10 @@ import (
 
 // runHooks runs a hook list, feeding each the container state on stdin.
 //
-// Hooks are how outside tooling extends the runtime without the runtime knowing
-// about it — the NVIDIA toolkit injects GPU driver libraries entirely this way,
-// which is why there's no vendor code here.
-//
-// A failing hook aborts creation. They set up preconditions the workload needs;
-// a container whose GPU injection failed shouldn't quietly run on the CPU.
+// This is how outside tooling extends the runtime without us knowing about it —
+// the NVIDIA toolkit injects driver libraries entirely through hooks, which is
+// why there's no vendor code here. A failing hook aborts creation: a container
+// whose GPU injection failed shouldn't quietly run on the CPU.
 func runHooks(hooks []oci.Hook, state *oci.State) error {
 	if len(hooks) == 0 {
 		return nil

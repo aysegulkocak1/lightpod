@@ -7,14 +7,12 @@ import (
 	"syscall"
 )
 
-// What we relay to the container's init.
+// What we relay to the container's init. Without it Ctrl-C kills lightpod and
+// orphans the workload — on an edge device, sensors and motors still running
+// after their supervisor is gone.
 //
-// Without this, Ctrl-C kills lightpod and orphans the workload, and a systemd
-// stop never reaches the process that needs to shut down — on an edge device,
-// sensors and motors still running after their supervisor is gone.
-//
-// Only what an operator or supervisor actually sends. Subscribing to everything
-// would also catch SIGURG, which the Go runtime uses constantly for preemption.
+// Only what an operator actually sends: subscribing to everything would also
+// catch SIGURG, which the Go runtime uses constantly for preemption.
 var forwardedSignals = []os.Signal{
 	syscall.SIGTERM, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGHUP,
 	syscall.SIGUSR1, syscall.SIGUSR2, syscall.SIGWINCH,

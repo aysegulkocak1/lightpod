@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -12,33 +13,16 @@ import (
 	"github.com/aysegulkocak1/lightpod/pkg/security"
 )
 
-// InitMain is the entry point of the container-side process — everything here
-// runs inside the new namespaces, as PID 1 of the container.
-//
-// It is reached by re-executing /proc/self/exe with the "init" argument. The
-// re-exec exists because namespace transitions are per-thread and the Go
-// runtime is multi-threaded: there is no safe way to unshare inside a running
-// Go program. Re-executing gives a process that is born in the right
-// namespaces, and the final execve replaces the Go runtime entirely, so the
-// container does not carry a Go heap it never asked for.
-//
-// The ordering in this function is a security contract, not a style choice.
-// Each step is annotated with why it sits where it does.
 // InitStage1 gets the container an identity, then replaces itself.
 //
-// Why two stages. When the parent clones into a new user namespace the child's
-// uid isn't mapped yet, so it reads as the overflow uid. Go's exec then runs
-// execve immediately — and execve from a non-zero uid wipes the permitted
-// capability set. Writing uid_map afterwards gives back the identity but not
-// the caps; those are only recomputed on exec. Symptom was a PID 1 that
-// couldn't even make its own mount namespace private.
+// Two stages because execve from an unmapped uid wipes the permitted capability
+// set, and the clone lands us there before uid_map is written. Caps are only
+// recomputed on exec, so we exec once more after the mapping exists — by then
+// we're uid 0 in the namespace and get the full set. Symptom without this was a
+// PID 1 that couldn't make its own mount namespace private.
 //
-// So we exec once more after the mapping exists. By then we're uid 0 in the
-// namespace, the kernel hands over the full permitted set, and stage 2 starts
-// with what it needs. Costs one exec of an already-resident binary.
-//
-// Handshaking here also leaves the parent free to use newuidmap/newgidmap,
-// which is how rootless gets a whole /etc/subuid range instead of one id.
+// Handshaking here also lets the parent use newuidmap, which is how rootless
+// maps a whole /etc/subuid range instead of one id.
 func InitStage1() error {
 	// Config stays unread in the pipe — stage 2 wants it and we're about to be
 	// replaced.
@@ -192,12 +176,10 @@ func applySysctls(spec *oci.Spec) error {
 
 // execUserProcess drops privileges and becomes the user's command.
 //
-// Order is the last line of defence, don't rearrange:
-//  1. Resolve the binary while the filesystem is still freely readable.
-//  2. Switch uid/gid, with KEEPCAPS first so the caps survive the transition.
-//  3. Apply the capability policy.
-//  4. no_new_privs, making the drop permanent across execve.
-//  5. seccomp last — everything above uses syscalls a real profile denies.
+// Order is the last line of defence, don't rearrange: resolve the binary while
+// the filesystem is readable, switch uid/gid (KEEPCAPS first so caps survive),
+// apply the capability policy, no_new_privs, then seccomp last — everything
+// above uses syscalls a real profile denies.
 func execUserProcess(cfg *initConfig) error {
 	process := cfg.Spec.Process
 
@@ -217,6 +199,12 @@ func execUserProcess(cfg *initConfig) error {
 	binary, err := exec.LookPath(process.Args[0])
 	if err != nil {
 		return fmt.Errorf("resolving %q inside the container: %w", process.Args[0], err)
+	}
+
+	// Before the uid switch: raising a hard limit or lowering oom_score_adj
+	// needs privileges we are about to give up.
+	if err := applyProcessLimits(process); err != nil {
+		return err
 	}
 
 	if err := setupUser(process); err != nil {
@@ -243,6 +231,56 @@ func execUserProcess(cfg *initConfig) error {
 		return fmt.Errorf("executing %s: %w", binary, err)
 	}
 	return nil // unreachable: execve does not return on success
+}
+
+// rlimitResources maps spec names to setrlimit(2) numbers. The numbers are the
+// same on every Linux architecture we target, and syscall only exports a few.
+var rlimitResources = map[string]int{
+	"RLIMIT_CPU":        0,
+	"RLIMIT_FSIZE":      1,
+	"RLIMIT_DATA":       2,
+	"RLIMIT_STACK":      3,
+	"RLIMIT_CORE":       4,
+	"RLIMIT_RSS":        5,
+	"RLIMIT_NPROC":      6,
+	"RLIMIT_NOFILE":     7,
+	"RLIMIT_MEMLOCK":    8,
+	"RLIMIT_AS":         9,
+	"RLIMIT_LOCKS":      10,
+	"RLIMIT_SIGPENDING": 11,
+	"RLIMIT_MSGQUEUE":   12,
+	"RLIMIT_NICE":       13,
+	"RLIMIT_RTPRIO":     14,
+	"RLIMIT_RTTIME":     15,
+}
+
+// applyProcessLimits handles rlimits, oom_score_adj and umask.
+//
+// RLIMIT_MEMLOCK and RLIMIT_RTPRIO matter here: real-time workloads pin memory
+// and raise priority, and both are capped by these rather than by capabilities.
+func applyProcessLimits(process *oci.Process) error {
+	for _, limit := range process.Rlimits {
+		resource, ok := rlimitResources[strings.ToUpper(limit.Type)]
+		if !ok {
+			return fmt.Errorf("unknown rlimit %q", limit.Type)
+		}
+		rlim := syscall.Rlimit{Cur: limit.Soft, Max: limit.Hard}
+		if err := syscall.Setrlimit(resource, &rlim); err != nil {
+			return fmt.Errorf("setting %s to %d/%d: %w", limit.Type, limit.Soft, limit.Hard, err)
+		}
+	}
+
+	if process.OOMScoreAdj != nil {
+		value := strconv.Itoa(*process.OOMScoreAdj)
+		if err := os.WriteFile("/proc/self/oom_score_adj", []byte(value), 0o644); err != nil {
+			return fmt.Errorf("setting oom_score_adj to %s: %w", value, err)
+		}
+	}
+
+	if process.User.Umask != nil {
+		syscall.Umask(int(*process.User.Umask))
+	}
+	return nil
 }
 
 // setupUser switches to the uid/gid the spec asks for.

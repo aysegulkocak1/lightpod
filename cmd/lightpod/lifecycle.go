@@ -193,6 +193,57 @@ func cmdPs(opts *globalOptions, args []string) error {
 	return w.Flush()
 }
 
+// cmdPrune removes records for containers that are no longer running.
+//
+// A lightpod killed mid-run leaves its record behind and that id stays unusable.
+// On a device restarting a container under a fixed name, one crash wedges it.
+func cmdPrune(opts *globalOptions, args []string) error {
+	fs := flag.NewFlagSet("prune", flag.ContinueOnError)
+	dryRun := fs.Bool("dry-run", false, "list what would be removed without removing it")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	store, _, err := openStore(opts)
+	if err != nil {
+		return err
+	}
+	containers, err := store.List()
+	if err != nil {
+		return err
+	}
+
+	var removed int
+	for _, record := range containers {
+		if record.Status != oci.StatusStopped {
+			continue
+		}
+		if *dryRun {
+			fmt.Println(record.ID)
+			removed++
+			continue
+		}
+		// Through the container handle, so the cgroup and poststop hooks get
+		// cleaned up too and not just the record.
+		c, err := loadContainer(opts, record.ID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "lightpod: %s: %v\n", record.ID, err)
+			continue
+		}
+		if err := c.Delete(false); err != nil {
+			fmt.Fprintf(os.Stderr, "lightpod: %s: %v\n", record.ID, err)
+			continue
+		}
+		fmt.Println(record.ID)
+		removed++
+	}
+
+	if removed == 0 {
+		fmt.Fprintln(os.Stderr, "nothing to prune")
+	}
+	return nil
+}
+
 // loadContainer rebuilds a handle for an existing container.
 //
 // The spec gets re-read from the recorded bundle, because every command after

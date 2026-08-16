@@ -116,12 +116,16 @@ func Adopt(id string, record *state.Container, mode PrivilegeMode, store *state.
 // hook or an orchestrator act on a fully configured container before the
 // workload gets to run.
 func (c *Container) Create() (err error) {
-	if _, err := c.store.Load(c.ID); err == nil {
-		return fmt.Errorf("container %q already exists", c.ID)
-	}
-
-	if err := os.MkdirAll(c.store.Dir(c.ID), 0o700); err != nil {
-		return fmt.Errorf("creating container directory: %w", err)
+	// Claim the id up front under the store lock, so two concurrent creates
+	// cannot both decide it is free.
+	if err := c.store.Create(&state.Container{
+		ID:      c.ID,
+		Bundle:  c.Bundle,
+		Rootfs:  c.Rootfs,
+		Status:  oci.StatusCreating,
+		Created: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		return err
 	}
 	defer func() {
 		if err != nil {
