@@ -46,6 +46,36 @@ var errNoCgroupDelegation = fmt.Errorf(
 		"      (then log out and back in)\n" +
 		"  - or run with --cgroup=none to accept an unlimited container explicitly")
 
+// containerCgroupPath picks the container's cgroup: <root>/lightpod/<id>, or
+// linux.cgroupsPath when the spec sets one.
+//
+// filepath.Join resolves ".." lexically, so the result needs checking against
+// the root, or "../../user.slice" lands outside the delegated subtree.
+func containerCgroupPath(root, id string, spec *oci.Spec) (string, error) {
+	if spec.Linux == nil || spec.Linux.CgroupsPath == "" {
+		return filepath.Join(root, "lightpod", id), nil
+	}
+
+	// Like runc: an absolute cgroupsPath is relative to the cgroup root, not the
+	// filesystem root.
+	custom := spec.Linux.CgroupsPath
+	if strings.Contains(custom, ":") {
+		// systemd's "slice:prefix:name". We're daemonless and don't talk to
+		// systemd, so flatten it into a directory name.
+		custom = strings.Join(strings.Split(custom, ":"), "-")
+	}
+
+	path := filepath.Join(root, strings.TrimPrefix(custom, "/"))
+	if !oci.IsWithin(root, path) {
+		return "", fmt.Errorf("linux.cgroupsPath %q escapes the cgroup root %s", spec.Linux.CgroupsPath, root)
+	}
+	// Limits written at the root apply to everything on the host, us included.
+	if path == root {
+		return "", fmt.Errorf("linux.cgroupsPath %q resolves to the cgroup root itself", spec.Linux.CgroupsPath)
+	}
+	return path, nil
+}
+
 // NewCgroupManager prepares the container's cgroup.
 //
 // Errors out rather than warning and carrying on. A container asked to stay
@@ -61,18 +91,9 @@ func NewCgroupManager(id string, spec *oci.Spec, mode PrivilegeMode, disabled bo
 		return nil, err
 	}
 
-	path := filepath.Join(root, "lightpod", id)
-	if spec.Linux != nil && spec.Linux.CgroupsPath != "" {
-		// Like runc: an absolute cgroupsPath is relative to the cgroup root,
-		// not the filesystem root.
-		custom := spec.Linux.CgroupsPath
-		if strings.Contains(custom, ":") {
-			// systemd's "slice:prefix:name". We're daemonless and don't talk to
-			// systemd, so flatten it into a directory name.
-			parts := strings.Split(custom, ":")
-			custom = strings.Join(parts, "-")
-		}
-		path = filepath.Join(root, strings.TrimPrefix(custom, "/"))
+	path, err := containerCgroupPath(root, id, spec)
+	if err != nil {
+		return nil, err
 	}
 
 	// Controllers have to be delegated down each level, so enable them on every

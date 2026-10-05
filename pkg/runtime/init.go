@@ -79,10 +79,6 @@ func initSetup(cfg *initConfig, sync *syncPipe) error {
 		}
 	}
 
-	if err := applySysctls(cfg.Spec); err != nil {
-		return err
-	}
-
 	// Step 4: every mount, but not the pivot.
 	if err := prepareRootfs(cfg); err != nil {
 		return err
@@ -157,20 +153,6 @@ func initSetup(cfg *initConfig, sync *syncPipe) error {
 	}
 
 	return execUserProcess(cfg)
-}
-
-// applySysctls writes the namespaced kernel parameters the spec asks for.
-func applySysctls(spec *oci.Spec) error {
-	if spec.Linux == nil || len(spec.Linux.Sysctl) == 0 {
-		return nil
-	}
-	for key, value := range spec.Linux.Sysctl {
-		path := "/proc/sys/" + strings.ReplaceAll(key, ".", "/")
-		if err := os.WriteFile(path, []byte(value), 0o644); err != nil {
-			return fmt.Errorf("setting sysctl %s=%s: %w", key, value, err)
-		}
-	}
-	return nil
 }
 
 // execUserProcess drops privileges and becomes the user's command.

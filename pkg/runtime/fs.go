@@ -77,6 +77,30 @@ func parseMountOptions(options []string) (flags, propagation uintptr, data strin
 	return flags, propagation, strings.Join(dataOpts, ",")
 }
 
+// rootfsPropagation resolves linux.rootfsPropagation to mount flags, or 0 when
+// the spec doesn't ask for one.
+//
+// shared and rshared are refused: pivot_root returns EINVAL when new_root is on
+// a shared mount, and we always pivot. An unknown mode is refused too, rather
+// than leaving the spec to believe in propagation it didn't get.
+func rootfsPropagation(spec *oci.Spec) (uintptr, error) {
+	if spec.Linux == nil || spec.Linux.RootfsPropagation == "" {
+		return 0, nil
+	}
+	mode := spec.Linux.RootfsPropagation
+
+	p, ok := propagationFlags[mode]
+	if !ok {
+		return 0, fmt.Errorf("linux.rootfsPropagation %q is not a known propagation mode", mode)
+	}
+	if p&syscall.MS_SHARED != 0 {
+		return 0, fmt.Errorf("linux.rootfsPropagation %q cannot be honoured: pivot_root(2) "+
+			"refuses a root filesystem on a shared mount, and lightpod always pivots. "+
+			"Use rslave if the container should see host mounts appear", mode)
+	}
+	return p, nil
+}
+
 // prepareRootfs does every mount but stops short of pivot_root.
 //
 // Split that way because createRuntime and createContainer hooks run in
@@ -86,15 +110,10 @@ func parseMountOptions(options []string) (flags, propagation uintptr, data strin
 func prepareRootfs(cfg *initConfig) error {
 	rootfs := cfg.Rootfs
 
-	// Private first. Anything mounted before this propagates back to the host,
-	// and a container mounting over a host path is a straight escape.
-	propagation := uintptr(syscall.MS_PRIVATE | syscall.MS_REC)
-	if cfg.Spec.Linux != nil && cfg.Spec.Linux.RootfsPropagation != "" {
-		if p, ok := propagationFlags[cfg.Spec.Linux.RootfsPropagation]; ok {
-			propagation = p
-		}
-	}
-	if err := syscall.Mount("", "/", "", propagation, ""); err != nil {
+	// Private first, unconditionally. Anything mounted before this propagates
+	// back to the host, and a container mounting over a host path is a straight
+	// escape. Not something rootfsPropagation gets to weaken.
+	if err := syscall.Mount("", "/", "", syscall.MS_PRIVATE|syscall.MS_REC, ""); err != nil {
 		return fmt.Errorf("making mount namespace private: %w", err)
 	}
 
@@ -102,6 +121,17 @@ func prepareRootfs(cfg *initConfig) error {
 	// is the usual way to turn a plain directory into one.
 	if err := syscall.Mount(rootfs, rootfs, "bind", syscall.MS_BIND|syscall.MS_REC, ""); err != nil {
 		return fmt.Errorf("bind mounting rootfs %s onto itself: %w", rootfs, err)
+	}
+
+	// Applies to the rootfs mount alone, with / already private.
+	propagation, err := rootfsPropagation(cfg.Spec)
+	if err != nil {
+		return err
+	}
+	if propagation != 0 {
+		if err := syscall.Mount("", rootfs, "", propagation, ""); err != nil {
+			return fmt.Errorf("setting rootfs propagation to %s: %w", cfg.Spec.Linux.RootfsPropagation, err)
+		}
 	}
 
 	for _, m := range cfg.Spec.Mounts {
@@ -117,12 +147,62 @@ func prepareRootfs(cfg *initConfig) error {
 		return err
 	}
 
+	// After the mounts, before readonlyPaths. See applySysctls.
+	if err := applySysctls(rootfs, cfg.Spec); err != nil {
+		return err
+	}
+
 	if cfg.Spec.Linux != nil {
 		if err := maskPaths(rootfs, cfg.Spec.Linux.MaskedPaths); err != nil {
 			return err
 		}
 		if err := readonlyPaths(rootfs, cfg.Spec.Linux.ReadonlyPaths); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// applySysctls writes linux.sysctl through the container's own procfs.
+//
+// Pinned from both sides. After the spec mounts, because a procfs superblock
+// belongs to the pid and net namespaces it was mounted in, so writing through
+// the host's reconfigures the host. Before readonlyPaths, which covers
+// /proc/sys.
+//
+// Pre-pivot, so the target is <rootfs>/proc/sys/... via secureJoin.
+func applySysctls(rootfs string, spec *oci.Spec) error {
+	if spec.Linux == nil || len(spec.Linux.Sysctl) == 0 {
+		return nil
+	}
+	for key, value := range spec.Linux.Sysctl {
+		if err := checkSysctlKey(key); err != nil {
+			return err
+		}
+		path, err := secureJoin(rootfs, "/proc/sys/"+strings.ReplaceAll(key, ".", "/"))
+		if err != nil {
+			return fmt.Errorf("resolving sysctl %s: %w", key, err)
+		}
+		if err := os.WriteFile(path, []byte(value), 0o644); err != nil {
+			return fmt.Errorf("setting sysctl %s=%s: %w", key, value, err)
+		}
+	}
+	return nil
+}
+
+// checkSysctlKey rejects keys that aren't a dotted sysctl name. secureJoin
+// clamps a traversing key inside the rootfs, but a clamped "../../etc/passwd"
+// is still a write nobody asked for.
+func checkSysctlKey(key string) error {
+	if key == "" {
+		return fmt.Errorf("linux.sysctl has an empty key")
+	}
+	if strings.ContainsAny(key, "/\x00") {
+		return fmt.Errorf("linux.sysctl key %q is not a sysctl name", key)
+	}
+	for _, segment := range strings.Split(key, ".") {
+		if segment == "" || segment == "." || segment == ".." {
+			return fmt.Errorf("linux.sysctl key %q is not a sysctl name", key)
 		}
 	}
 	return nil
@@ -464,7 +544,7 @@ func secureJoin(rootfs, unsafePath string) (string, error) {
 		remaining = "/" + strings.TrimPrefix(remaining, "/")
 	}
 
-	if !strings.HasPrefix(current, rootfs) {
+	if !oci.IsWithin(rootfs, current) {
 		return "", fmt.Errorf("path %q escapes the container root", unsafePath)
 	}
 	return current, nil
