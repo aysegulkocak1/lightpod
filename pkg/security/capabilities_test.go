@@ -1,6 +1,7 @@
 package security
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/aysegulkocak1/lightpod/pkg/oci"
@@ -68,5 +69,81 @@ func TestDefaultCapabilitiesAreAllKnown(t *testing.T) {
 	// make every container fail to start.
 	if _, err := parseCapabilities(oci.DefaultCapabilities); err != nil {
 		t.Fatalf("default capability set does not parse: %v", err)
+	}
+}
+
+func TestResolveCapabilitiesNilDropsEverything(t *testing.T) {
+	// No section means no capabilities, not "keep what we inherited", which in
+	// rootfull mode is the host's full root set.
+	p, err := resolveCapabilities(nil)
+	if err != nil {
+		t.Fatalf("resolveCapabilities(nil): %v", err)
+	}
+	for _, s := range []struct {
+		name string
+		set  capSet
+	}{
+		{"bounding", p.bounding},
+		{"effective", p.effective},
+		{"permitted", p.permitted},
+		{"inheritable", p.inheritable},
+		{"ambient", p.ambient},
+	} {
+		if s.set != 0 {
+			t.Errorf("%s set = %#x (%v), want empty", s.name, uint64(s.set), s.set.Names())
+		}
+	}
+}
+
+func TestResolveCapabilitiesEmptySectionMatchesNil(t *testing.T) {
+	// "capabilities": {} and no capabilities key at all mean the same thing.
+	fromNil, err := resolveCapabilities(nil)
+	if err != nil {
+		t.Fatalf("resolveCapabilities(nil): %v", err)
+	}
+	fromEmpty, err := resolveCapabilities(&oci.LinuxCapabilities{})
+	if err != nil {
+		t.Fatalf("resolveCapabilities(&{}): %v", err)
+	}
+	if fromNil != fromEmpty {
+		t.Errorf("nil section resolved to %+v, empty section to %+v", fromNil, fromEmpty)
+	}
+}
+
+func TestResolveCapabilitiesCarriesEachSetSeparately(t *testing.T) {
+	// The sets aren't interchangeable: permitted without effective is a cap the
+	// process can raise but isn't using.
+	p, err := resolveCapabilities(&oci.LinuxCapabilities{
+		Bounding:    []string{"CAP_CHOWN", "CAP_NET_RAW"},
+		Effective:   []string{"CAP_CHOWN"},
+		Permitted:   []string{"CAP_CHOWN", "CAP_NET_RAW"},
+		Inheritable: []string{"CAP_NET_RAW"},
+		Ambient:     []string{"CAP_NET_RAW"},
+	})
+	if err != nil {
+		t.Fatalf("resolveCapabilities: %v", err)
+	}
+	if !p.bounding.has(CAP_CHOWN) || !p.bounding.has(CAP_NET_RAW) {
+		t.Errorf("bounding = %v, want CHOWN and NET_RAW", p.bounding.Names())
+	}
+	if p.effective.has(CAP_NET_RAW) {
+		t.Errorf("effective = %v, must not contain NET_RAW", p.effective.Names())
+	}
+	if p.inheritable.has(CAP_CHOWN) {
+		t.Errorf("inheritable = %v, must not contain CHOWN", p.inheritable.Names())
+	}
+}
+
+func TestResolveCapabilitiesNamesTheOffendingSet(t *testing.T) {
+	// Five sets parse the same way, so the error has to say which one failed.
+	_, err := resolveCapabilities(&oci.LinuxCapabilities{
+		Bounding:  []string{"CAP_CHOWN"},
+		Effective: []string{"CAP_MADE_UP"},
+	})
+	if err == nil {
+		t.Fatal("expected an error for an unknown capability name, got nil")
+	}
+	if got := err.Error(); !strings.Contains(got, "effective") {
+		t.Errorf("error %q does not name the set it came from", got)
 	}
 }

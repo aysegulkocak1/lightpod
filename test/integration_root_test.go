@@ -8,7 +8,9 @@
 package test
 
 import (
+	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -148,4 +150,89 @@ func cgroupV2HasControllers(t *testing.T) bool {
 		}
 	}
 	return false
+}
+
+// Sysctls must land in the container's namespaces and not the host's.
+//
+// Rootfull only: without a user namespace in the way, a write through the
+// host's procfs would actually succeed. Both halves are asserted, because
+// checking only the host would also pass if the sysctl were silently dropped.
+func TestRootfullSysctlAppliesInContainerNotHost(t *testing.T) {
+	requireRoot(t)
+
+	const hostPath = "/proc/sys/net/ipv4/ip_forward"
+	before, err := os.ReadFile(hostPath)
+	if err != nil {
+		t.Skipf("cannot read %s: %v", hostPath, err)
+	}
+	original := strings.TrimSpace(string(before))
+
+	// The opposite of the host's value, so a leaking write is visible.
+	want := "1"
+	if original == "1" {
+		want = "0"
+	}
+
+	// On regression this test is what changed the host, so put it back.
+	t.Cleanup(func() {
+		if data, err := os.ReadFile(hostPath); err == nil {
+			if strings.TrimSpace(string(data)) != original {
+				_ = os.WriteFile(hostPath, []byte(original+"\n"), 0o644)
+			}
+		}
+	})
+
+	env := setup(t)
+
+	specJSON, _, err := env.run(t, "spec", "--rootfs", env.rootfs, "/check")
+	if err != nil {
+		t.Fatalf("generating spec: %v", err)
+	}
+	var spec map[string]any
+	if err := json.Unmarshal([]byte(specJSON), &spec); err != nil {
+		t.Fatalf("parsing spec: %v", err)
+	}
+	linux, ok := spec["linux"].(map[string]any)
+	if !ok {
+		t.Fatal("generated spec has no linux section")
+	}
+	linux["sysctl"] = map[string]string{"net.ipv4.ip_forward": want}
+
+	// Read it back from inside, so "applied" is distinguishable from "dropped".
+	process, ok := spec["process"].(map[string]any)
+	if !ok {
+		t.Fatal("generated spec has no process section")
+	}
+	process["args"] = []string{"/check", "readfile", hostPath}
+
+	bundle := filepath.Join(t.TempDir(), "bundle")
+	if err := os.MkdirAll(bundle, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := json.Marshal(spec)
+	if err := os.WriteFile(filepath.Join(bundle, "config.json"), encoded, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, err := env.run(t, "run", "--bundle", bundle, "--cgroup", "none", "sysctl-host")
+	if err != nil {
+		t.Fatalf("running container with a sysctl: %v\nstderr: %s", err, stderr)
+	}
+
+	// Half one: the container got what it asked for.
+	if inside := strings.TrimSpace(stdout); inside != want {
+		t.Errorf("container read %q from its own %s, want %q; the sysctl did not apply",
+			inside, hostPath, want)
+	}
+
+	// Half two: the host did not.
+	after, err := os.ReadFile(hostPath)
+	if err != nil {
+		t.Fatalf("re-reading %s: %v", hostPath, err)
+	}
+	if got := strings.TrimSpace(string(after)); got != original {
+		t.Fatalf("container's sysctl changed the HOST: %s went %s -> %s "+
+			"(it was only ever asking for %s inside its own namespace)",
+			hostPath, original, got, want)
+	}
 }

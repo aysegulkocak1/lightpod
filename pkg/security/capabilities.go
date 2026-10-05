@@ -123,6 +123,46 @@ func parseCapabilities(names []string) (capSet, error) {
 	return set, nil
 }
 
+// capabilityPolicy is the five sets a spec asks for, parsed and validated.
+type capabilityPolicy struct {
+	bounding    capSet
+	effective   capSet
+	permitted   capSet
+	inheritable capSet
+	ambient     capSet
+}
+
+// resolveCapabilities parses the spec's capability section into the five sets.
+// Separate from applying them, which capset does to the live process and so
+// can't run under test.
+//
+// No section means five empty sets. The other reading would make its absence
+// the most privileged thing a bundle can say.
+func resolveCapabilities(caps *oci.LinuxCapabilities) (capabilityPolicy, error) {
+	var p capabilityPolicy
+	if caps == nil {
+		return p, nil
+	}
+
+	var err error
+	if p.bounding, err = parseCapabilities(caps.Bounding); err != nil {
+		return capabilityPolicy{}, fmt.Errorf("capabilities.bounding: %w", err)
+	}
+	if p.effective, err = parseCapabilities(caps.Effective); err != nil {
+		return capabilityPolicy{}, fmt.Errorf("capabilities.effective: %w", err)
+	}
+	if p.permitted, err = parseCapabilities(caps.Permitted); err != nil {
+		return capabilityPolicy{}, fmt.Errorf("capabilities.permitted: %w", err)
+	}
+	if p.inheritable, err = parseCapabilities(caps.Inheritable); err != nil {
+		return capabilityPolicy{}, fmt.Errorf("capabilities.inheritable: %w", err)
+	}
+	if p.ambient, err = parseCapabilities(caps.Ambient); err != nil {
+		return capabilityPolicy{}, fmt.Errorf("capabilities.ambient: %w", err)
+	}
+	return p, nil
+}
+
 // ApplyCapabilities reduces the process to exactly what the spec asks for.
 //
 // Order matters:
@@ -133,30 +173,15 @@ func parseCapabilities(names []string) (capSet, error) {
 //  4. Ambient raises last; a cap can only go ambient once it's permitted and
 //     inheritable.
 func ApplyCapabilities(caps *oci.LinuxCapabilities) error {
-	if caps == nil {
-		return nil
-	}
-
-	bounding, err := parseCapabilities(caps.Bounding)
+	want, err := resolveCapabilities(caps)
 	if err != nil {
-		return fmt.Errorf("capabilities.bounding: %w", err)
+		return err
 	}
-	effective, err := parseCapabilities(caps.Effective)
-	if err != nil {
-		return fmt.Errorf("capabilities.effective: %w", err)
-	}
-	permitted, err := parseCapabilities(caps.Permitted)
-	if err != nil {
-		return fmt.Errorf("capabilities.permitted: %w", err)
-	}
-	inheritable, err := parseCapabilities(caps.Inheritable)
-	if err != nil {
-		return fmt.Errorf("capabilities.inheritable: %w", err)
-	}
-	ambient, err := parseCapabilities(caps.Ambient)
-	if err != nil {
-		return fmt.Errorf("capabilities.ambient: %w", err)
-	}
+	bounding := want.bounding
+	effective := want.effective
+	permitted := want.permitted
+	inheritable := want.inheritable
+	ambient := want.ambient
 
 	lastCap := lastCapability()
 	for bit := 0; bit <= lastCap; bit++ {

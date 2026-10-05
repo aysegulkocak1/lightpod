@@ -67,7 +67,7 @@ func ResolveRootfs(spec *Spec, bundle string) (string, error) {
 	}
 	// Relative paths must stay in the bundle. Absolute ones are trusted — that's
 	// `--rootfs /srv/images/busybox`, typed by the caller, not chosen by the bundle.
-	if !filepath.IsAbs(spec.Root.Path) && !isWithin(absBundle, rootfs) {
+	if !filepath.IsAbs(spec.Root.Path) && !IsWithin(absBundle, rootfs) {
 		return "", fmt.Errorf("root.path %q escapes the bundle directory", spec.Root.Path)
 	}
 
@@ -81,8 +81,12 @@ func ResolveRootfs(spec *Spec, bundle string) (string, error) {
 	return rootfs, nil
 }
 
-// isWithin reports whether path is parent or a descendant of it.
-func isWithin(parent, path string) bool {
+// IsWithin reports whether path is parent or a descendant of it.
+//
+// Shared so every containment check agrees: a bare strings.HasPrefix reads
+// /rootfs-evil as inside /rootfs. Takes cleaned absolute paths, and only
+// compares them.
+func IsWithin(parent, path string) bool {
 	if path == parent {
 		return true
 	}
